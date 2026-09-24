@@ -1,0 +1,49 @@
+# Dependencies and generated output
+node_modules/
+.next/
+dist/
+target/
+coverage/
+src/generated/
+*.tsbuildinfo
+__pycache__/
+*.py[cod]
+.venv/
+# Local secrets and user data
+.env*
+!.env.example
+config.json
+vault/
+*.db
+*.db-*
+*.sqlite*
+backups/
+certs/
+*.pem
+*.key
+*.log
+# Editors and test artifacts
+.vs/
+.vscode/
+.idea/
+.tools/
+playwright-report/
+test-results/
+cypress/screenshots/
+cypress/videos/
+# Game engine caches
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Bb]uilds/
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+*.csproj
+*.sln
+*.slnx
+.DS_Store
+Thumbs.db

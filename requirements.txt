@@ -1,0 +1,41 @@
+# ============================================================
+# MERCADINHO - DEPENDÊNCIAS
+# ============================================================
+#
+# IMPORTANTE: o requirements.txt instala as bibliotecas Python.
+# O Python em si precisa ser instalado separadamente no Windows.
+#
+# PYTHON RECOMENDADO (Windows 64 bits):
+# https://www.python.org/downloads/release/python-31315/
+# Download direto do instalador oficial 64 bits:
+# https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.exe
+#
+# Depois de instalar o Python, abra o CMD na pasta do mercadinho e rode:
+# python -m pip install -r requirements.txt
+#
+# ============================================================
+# BIBLIOTECAS USADAS PELO SISTEMA
+# ============================================================
+
+# Importação e leitura das planilhas Excel (.xlsx)
+openpyxl==3.1.5
+# Download oficial / arquivos:
+# https://pypi.org/project/openpyxl/#files
+
+# Comunicação com a balança Toledo pela porta COM (COM3)
+pyserial==3.5
+# Download oficial / arquivos:
+# https://pypi.org/project/pyserial/#files
+
+# Integração com recursos do Windows e impressora térmica
+pywin32==312
+# Download oficial / arquivos:
+# https://pypi.org/project/pywin32/#files
+
+# ============================================================
+# NÃO PRECISA BAIXAR MANUALMENTE AS BIBLIOTECAS ACIMA.
+# O comando abaixo instala tudo automaticamente:
+#
+# python -m pip install -r requirements.txt
+#
+# ============================================================

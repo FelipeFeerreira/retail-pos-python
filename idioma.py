@@ -38,6 +38,7 @@ _PT = {
     'gerar_catalogo': 'Gerar catálogo atualizado (.xlsx)',
     'gerar_planilha_entrada': 'Gerar planilha de entrada de mercadoria (.xlsx)',
     'importar_entrada': 'Importar entrada de mercadoria (.xlsx)',
+    'importar_nfe': 'Importar nota fiscal do fornecedor (NF-e / XML)',
     'revisar_categorias': 'Revisar categorias dos produtos',
     'exportar_relatorio': 'Exportar relatório de análises (.xlsx)',
     'atalhos_do_teclado': 'Atalhos do teclado (F1)',
@@ -111,6 +112,8 @@ _PT = {
     'login': 'Entre com a senha para acessar o sistema.',
     'administrador': 'Acesso ao sistema',
     'feche': 'Feche para sair',
+    'vender_sem_estoque': 'Permitir vender sem estoque (estoque pode ficar negativo)',
+    'vender_sem_estoque_dica': 'Quando marcado, a venda não é bloqueada por falta de estoque ou validade.',
 }
 
 _EN = {
@@ -125,6 +128,7 @@ _EN = {
     'gerar_catalogo': 'Generate catalog (.xlsx)',
     'gerar_planilha_entrada': 'Generate merchandise intake sheet (.xlsx)',
     'importar_entrada': 'Import merchandise intake (.xlsx)',
+    'importar_nfe': 'Import supplier invoice (NF-e / XML)',
     'revisar_categorias': 'Review product categories',
     'exportar_relatorio': 'Export analytics report (.xlsx)',
     'atalhos_do_teclado': 'Keyboard shortcuts (F1)',
@@ -198,6 +202,8 @@ _EN = {
     'login': 'Enter the password to access the system.',
     'administrador': 'System access',
     'feche': 'Close to exit',
+    'vender_sem_estoque': 'Allow selling without stock (stock can go negative)',
+    'vender_sem_estoque_dica': 'When enabled, sales are not blocked by lack of stock or expiry.',
 }
 
 

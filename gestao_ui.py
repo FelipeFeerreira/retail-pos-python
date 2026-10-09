@@ -13,6 +13,13 @@ import operacoes as op
 import database as db
 
 
+def _grab_set_safe(dlg):
+    try:
+        dlg.grab_set()
+    except tk.TclError:
+        pass
+
+
 class Tooltip:
     def __init__(self,widget,texto):
         self.widget,self.texto,self.janela=widget,texto,None
@@ -41,7 +48,8 @@ class GestaoMixin:
 
     def _formulario(self,titulo,campos,confirmar,descricao=''):
         """Campos: (chave, rótulo, valor inicial, opções ou None)."""
-        dlg=tk.Toplevel(self); dlg.title(titulo); dlg.transient(self); dlg.grab_set()
+        dlg=tk.Toplevel(self); dlg.title(titulo); dlg.transient(self); _grab_set_safe(dlg)
+        self._dlg_formulario=dlg
         dlg.geometry(f'580x{min(760,180+len(campos)*58)}'); dlg.minsize(440,320)
         rodape=ttk.Frame(dlg,padding=12); rodape.pack(side='bottom',fill='x')
         canvas=tk.Canvas(dlg,highlightthickness=0)
@@ -71,6 +79,12 @@ class GestaoMixin:
         ttk.Button(rodape,text='Cancelar',command=dlg.destroy).pack(side='right',padx=8)
         dlg.bind('<Escape>',lambda e:dlg.destroy())
         return dlg
+
+    def _parent_ativo(self):
+        """Janela certa para abrir messagebox: o formulario aberto (que tem o
+        grab) ou a janela principal. Sem isso, o modal pode ficar atras do
+        formulario e a tela parecer travada."""
+        return getattr(self, '_dlg_formulario', None) or self
 
     def _tabela_gestao(self,parent,colunas):
         frame=ttk.Frame(parent); frame.pack(fill='both',expand=True,padx=8,pady=8)
@@ -203,7 +217,7 @@ class GestaoMixin:
     def _personalizar_painel(self):
         opcoes={'Entradas reais':'entradas','Saídas reais':'saidas','Fluxo líquido':'fluxo','Vendas (competência)':'vendas','Ticket médio':'ticket'}
         atuais=g.config('painel_'+g.USUARIO,list(opcoes.values()))
-        dlg=tk.Toplevel(self); dlg.title('Indicadores do painel'); dlg.transient(self); dlg.grab_set()
+        dlg=tk.Toplevel(self); dlg.title('Indicadores do painel'); dlg.transient(self); _grab_set_safe(dlg)
         vals={}
         for nome,chave in opcoes.items():
             vals[chave]=tk.BooleanVar(value=chave in atuais)
@@ -413,19 +427,106 @@ class GestaoMixin:
     def _receber_fiado(self):
         cli=self._cliente_selecionado(); cid=cli['id']; saldo=op.saldo_fiado(cid)
         if saldo<=0: raise g.ErroGestao('Cliente sem saldo a receber.')
-        encargos=sum(t['encargos_centavos'] for t in g.titulos_cliente(cid))/100
-        chave=uuid.uuid4().hex
-        def salvar(v):
-            principal=g.centavos(v['valor']); restante=principal; calculado=0
-            for t in g.titulos_cliente(cid):
-                usar=min(restante,max(0,t['saldo_centavos']))
-                if usar: calculado+=round(t['encargos_centavos']*usar/t['saldo_centavos']); restante-=usar
-            cobrar=v['encargos']=='Cobrar encargos calculados'
-            if not messagebox.askyesno('Confirmar recebimento',f"Principal: {self._moeda(principal/100)}\nEncargos: {self._moeda(calculado/100 if cobrar else 0)}\nTotal: {self._moeda((principal+(calculado if cobrar else 0))/100)}\nConfirmar o recebimento?"): return False
-            pid=g.receber_fiado(cid,v['valor'],v['obs'],v['forma'],chave,cobrar)
+        taxas=self._config_taxas() if hasattr(self,'_config_taxas') else {}
+        vouchers=taxas.get('vouchers') or [{'nome':'TICKET','taxa':0},{'nome':'VR/VA','taxa':0},{'nome':'Sodexo','taxa':0},{'nome':'Alelo','taxa':0}]
+        nomes_voucher=[v['nome'] for v in vouchers]
+        FORMAS=['Dinheiro','Pix','Cartão de crédito','Cartão de débito','Voucher']
+
+        dlg=tk.Toplevel(self); dlg.title('Receber pagamento — '+cli['nome']); dlg.geometry('470x600')
+        dlg.configure(bg='#ffffff'); dlg.transient(self); _grab_set_safe(dlg); self._dlg_formulario=dlg
+        dlg.resizable(False,False); dlg.bind('<Escape>',lambda e:dlg.destroy())
+        frm=ttk.Frame(dlg,padding=16); frm.pack(fill='both',expand=True)
+        ttk.Label(frm,text=cli['nome'],font=('Segoe UI',16,'bold')).pack(anchor='w')
+        ttk.Label(frm,text=f'Principal em aberto: {self._moeda(saldo)}').pack(anchor='w',pady=(0,12))
+
+        ttk.Label(frm,text='Quanto ele(a) pagou agora (R$)').pack(anchor='w',pady=(6,2))
+        var_valor=tk.StringVar(value=f'{saldo:.2f}'.replace('.',','))
+        ttk.Entry(frm,textvariable=var_valor).pack(fill='x',ipady=4)
+
+        ttk.Label(frm,text='Forma de pagamento').pack(anchor='w',pady=(10,2))
+        var_forma=tk.StringVar(value='Dinheiro')
+        cb_forma=ttk.Combobox(frm,textvariable=var_forma,values=FORMAS,state='readonly'); cb_forma.pack(fill='x')
+
+        ttk.Label(frm,text='Bandeira (só para Voucher)').pack(anchor='w',pady=(10,2))
+        var_bandeira=tk.StringVar(value=nomes_voucher[0])
+        cb_bandeira=ttk.Combobox(frm,textvariable=var_bandeira,values=nomes_voucher,state='disabled'); cb_bandeira.pack(fill='x')
+
+        ttk.Label(frm,text='Encargos (atraso)').pack(anchor='w',pady=(10,2))
+        var_enc=tk.StringVar(value='Cobrar encargos calculados')
+        ttk.Combobox(frm,textvariable=var_enc,values=['Cobrar encargos calculados','Dispensar encargos (gerente/financeiro)'],state='readonly').pack(fill='x')
+
+        ttk.Label(frm,text='Observação (opcional)').pack(anchor='w',pady=(10,2))
+        var_obs=tk.StringVar(); ttk.Entry(frm,textvariable=var_obs).pack(fill='x')
+
+        resumo=tk.Label(frm,text='',justify='left',bg='#ffffff',fg='#173b2d',font=('Consolas',10))
+        resumo.pack(anchor='w',pady=(14,4))
+
+        def pct_da_forma():
+            f=var_forma.get()
+            if f=='Pix': return float(taxas.get('pix',0) or 0)
+            if f=='Cartão de crédito': return float(taxas.get('credito',0) or 0)
+            if f=='Cartão de débito': return float(taxas.get('debito',0) or 0)
+            if f=='Voucher':
+                v=next((x for x in vouchers if x['nome']==var_bandeira.get()),None)
+                return float((v or {}).get('taxa',0) or 0)
+            return 0.0
+
+        def calcular():
+            principal=self._para_float(var_valor.get(),0)
+            cobrar=var_enc.get()=='Cobrar encargos calculados'
+            enc=0
+            if cobrar and principal>0:
+                restante=g.centavos(principal)
+                for t in g.titulos_cliente(cid):
+                    usar=min(restante,max(0,t['saldo_centavos']))
+                    if usar: enc+=round(t['encargos_centavos']*usar/t['saldo_centavos']); restante-=usar
+            pct=pct_da_forma()
+            base=principal+enc/100.0
+            taxa=round(base*pct/100.0,2)
+            return principal, enc, pct, taxa, round(base+taxa,2)
+
+        def atualizar(*_):
+            principal,enc,pct,taxa,total=calcular()
+            linhas=[f'Principal: {self._moeda(principal)}', f'Encargos: {self._moeda(enc/100)}']
+            if pct>0: linhas.append(f'Taxa {var_forma.get()} ({pct}%): {self._moeda(taxa)}')
+            linhas.append(f'Total a receber: {self._moeda(total)}')
+            resumo.config(text='\n'.join(linhas))
+
+        def toggle_bandeira(*_):
+            cb_bandeira.configure(state='readonly' if var_forma.get()=='Voucher' else 'disabled')
+            atualizar()
+
+        var_valor.trace_add('write',atualizar)
+        var_enc.trace_add('write',atualizar)
+        cb_forma.bind('<<ComboboxSelected>>',toggle_bandeira)
+        cb_bandeira.bind('<<ComboboxSelected>>',atualizar)
+        toggle_bandeira()
+
+        def confirmar():
+            principal,enc,pct,taxa,total=calcular()
+            if principal<=0:
+                messagebox.showerror('Valor','Informe um valor maior que zero.',parent=dlg); return
+            cobrar=var_enc.get()=='Cobrar encargos calculados'
+            forma=var_forma.get(); obs=var_obs.get().strip()
+            if forma=='Voucher': obs=(f'Voucher {var_bandeira.get()} '+obs).strip()
+            msg=f"Principal: {self._moeda(principal)}\nEncargos: {self._moeda(enc/100)}"
+            if pct>0: msg+=f"\nTaxa {forma} ({pct}%): {self._moeda(taxa)}"
+            msg+=f"\nTotal a receber: {self._moeda(total)}\n\nConfirmar o recebimento?"
+            try: dlg.lift()
+            except Exception: pass
+            if not messagebox.askyesno('Confirmar recebimento',msg,parent=dlg): return
+            try:
+                pid=g.receber_fiado(cid,principal,obs,forma,uuid.uuid4().hex,cobrar,taxa_centavos=g.centavos(taxa))
+            except Exception as exc:
+                messagebox.showerror('Erro',str(exc),parent=dlg); return
+            dlg.destroy()
             self._mostrar_recibo(pid)
-        self._formulario('Receber pagamento — '+cli['nome'],[('valor','Principal que será quitado (R$)',saldo,None),('forma','Forma de pagamento','Dinheiro',['Dinheiro','Pix','Cartão de crédito','Cartão de débito']),('encargos','Encargos','Cobrar encargos calculados',['Cobrar encargos calculados','Dispensar encargos (gerente/financeiro)']),('obs','Observações','',None)],salvar,
-                         f'Principal: {self._moeda(saldo)}. Encargos totais hoje: {self._moeda(encargos)}. Em pagamento parcial, os encargos são proporcionais ao principal quitado; confira o total antes de confirmar.')
+            self._atualizar_financeiro()
+            self._aba_atualizada()
+
+        bot=ttk.Frame(frm); bot.pack(side='bottom',fill='x',pady=(10,0))
+        ttk.Button(bot,text='Confirmar pagamento',command=confirmar).pack(side='right')
+        ttk.Button(bot,text='Cancelar',command=dlg.destroy).pack(side='right',padx=8)
 
     def _mostrar_recibo(self,pid):
         texto=g.recibo_fiado(pid)
@@ -441,7 +542,7 @@ class GestaoMixin:
     def _recibo_opcoes(self,r):
         self._mostrar_recibo(r['id'])
         if r['tipo']=='recebimento' and not r['estornado'] and g.PERFIL=='gerente':
-            if messagebox.askyesno('Estorno','Deseja estornar este recebimento?'): self._pedir_estorno('recebimento',r['id'])
+            if messagebox.askyesno('Estorno','Deseja estornar este recebimento?',parent=self._parent_ativo()): self._pedir_estorno('recebimento',r['id'])
 
     def _pedir_estorno(self,tipo,rid):
         motivo=simpledialog.askstring('Estorno','Motivo obrigatório:',parent=self)
@@ -571,7 +672,7 @@ class GestaoMixin:
         if not produtos: raise g.ErroGestao('Cadastre produtos primeiro.')
         def salvar(v):
             pid=int(v['produto'].split(' — ')[0]); p=op.obter_produto(pid)
-            if messagebox.askyesno('Confirmar inventário',f"Saldo atual: {p['quantidade_estoque']}\nContagem: {v['quantidade']}\nConfirmar ajuste?"):
+            if messagebox.askyesno('Confirmar inventário',f"Saldo atual: {p['quantidade_estoque']}\nContagem: {v['quantidade']}\nConfirmar ajuste?",parent=self._parent_ativo()):
                 g.ajustar_estoque(pid,v['quantidade'],'ajuste',v['motivo'],v['validade'] or None)
         self._formulario('Inventário físico',[('produto','Produto',produtos[0],produtos),('quantidade','Quantidade física contada','',None),('motivo','Justificativa da divergência','Inventário periódico',None),('validade','Validade para entrada de diferença perecível','',None)],salvar,
                          'Conte um produto por vez com suas movimentações suspensas. Ajustes de saída reduzem lotes por FEFO; confira a distribuição física dos lotes antes de confirmar.')

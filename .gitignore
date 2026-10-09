@@ -18,6 +18,7 @@ vault/
 *.db-*
 *.sqlite*
 backups/
+recibos/
 certs/
 *.pem
 *.key

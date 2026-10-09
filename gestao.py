@@ -106,6 +106,7 @@ def migrar(conn):
         'itens_venda': {'custo_unitario': 'REAL', 'nome_original': 'TEXT'},
         'pagamentos_fiado': {'tipo': "TEXT NOT NULL DEFAULT 'legado'", 'encargos_centavos': 'INTEGER NOT NULL DEFAULT 0',
                              'chave_operacao': 'TEXT', 'estornado': 'INTEGER NOT NULL DEFAULT 0', 'movimento_id': 'INTEGER',
+                             'taxa_centavos': 'INTEGER NOT NULL DEFAULT 0',
                              'usuario': "TEXT NOT NULL DEFAULT 'Legado'"},
         'consumo_interno': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'centro_custo': "TEXT NOT NULL DEFAULT ''"},
         'perdas': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'"},
@@ -236,19 +237,19 @@ def entrada_pagamento(c, forma, valor, origem, referencia, taxa=0, conta_id=None
                      f'{origem} #{referencia}',origem,referencia)
 
 
-def baixar_estoque(c, produto_id, qtd, origem, referencia, permitir_vencido=False, lote_id=None):
+def baixar_estoque(c, produto_id, qtd, origem, referencia, permitir_vencido=False, lote_id=None, permitir_negativo=False):
     qtd = quantidade(qtd)
     p = c.execute('SELECT * FROM produtos WHERE id=? AND ativo=1', (produto_id,)).fetchone()
     if not p:
         raise ErroGestao('Produto não encontrado ou inativo.')
-    if qtd > p['quantidade_estoque'] + .00001:
+    if not permitir_negativo and qtd > p['quantidade_estoque'] + .00001:
         raise ErroGestao(f'Estoque insuficiente de {p["nome"]}: disponível {p["quantidade_estoque"]:g}.')
     lotes = c.execute('SELECT * FROM lotes_validade WHERE produto_id=? AND quantidade>0 ORDER BY data_validade IS NULL,data_validade,id', (produto_id,)).fetchall()
-    if sum(l['quantidade'] for l in lotes) > p['quantidade_estoque'] + .001:
+    if not permitir_negativo and sum(l['quantidade'] for l in lotes) > p['quantidade_estoque'] + .001:
         raise ErroGestao(f'Lotes de {p["nome"]} excedem o estoque. Faça a conferência antes de continuar.')
     hoje = date.today().isoformat()
     vencidos = sum(l['quantidade'] for l in lotes if l['data_validade'] and l['data_validade'] < hoje)
-    if not permitir_vencido and qtd > p['quantidade_estoque']-vencidos+.00001:
+    if not permitir_negativo and not permitir_vencido and qtd > p['quantidade_estoque']-vencidos+.00001:
         raise ErroGestao(f'{p["nome"]}: saldo disponível contém produtos vencidos. Registre a perda do lote.')
     if lote_id:
         lotes = [l for l in lotes if l['id'] == lote_id]
@@ -256,7 +257,7 @@ def baixar_estoque(c, produto_id, qtd, origem, referencia, permitir_vencido=Fals
             raise ErroGestao('Quantidade indisponível no lote selecionado.')
     elif not permitir_vencido:
         lotes = [l for l in lotes if not l['data_validade'] or l['data_validade'] >= hoje]
-    if p['perecivel'] and not permitir_vencido and sum(l['quantidade'] for l in lotes if l['data_validade'])+.00001 < qtd:
+    if p['perecivel'] and not permitir_negativo and not permitir_vencido and sum(l['quantidade'] for l in lotes if l['data_validade'])+.00001 < qtd:
         raise ErroGestao(f'{p["nome"]}: cadastre a validade do estoque perecível antes da saída.')
     restante = qtd
     for lote in lotes:
@@ -313,8 +314,9 @@ def registrar_venda(itens, forma_pagamento='dinheiro', desconto=0, cliente_id=No
                 raise ErroGestao('Venda excede o limite de crédito. Solicite revisão da política ao gerente.')
         v=c.execute('INSERT INTO vendas(valor_total,desconto,forma_pagamento,cliente_id,taxa_paga,voucher_marca,chave_operacao,usuario) VALUES(?,?,?,?,?,?,?,?)',
                     (total/100,desc/100,forma_pagamento,cliente_id,taxa/100,voucher_marca,chave_operacao,USUARIO)).lastrowid
+        permitir_negativo = config('permitir_estoque_negativo', False, c)
         for p,qtd,preco in processados:
-            baixar_estoque(c,p['id'],qtd,'Venda',v)
+            baixar_estoque(c,p['id'],qtd,'Venda',v,permitir_negativo=permitir_negativo)
             c.execute('INSERT INTO itens_venda(venda_id,produto_id,quantidade,preco_unitario,custo_unitario,nome_original) VALUES(?,?,?,?,?,?)',
                       (v,p['id'],qtd,preco,p['preco_custo'],p['nome']))
         if politica:
@@ -348,9 +350,11 @@ def titulos_cliente(cliente_id, hoje=None):
     return rows
 
 
-def receber_fiado(cliente_id, valor, observacao='', forma_pagamento='dinheiro', chave_operacao=None, cobrar_encargos=True):
+def receber_fiado(cliente_id, valor, observacao='', forma_pagamento='dinheiro', chave_operacao=None, cobrar_encargos=True, taxa_centavos=0):
     permitir('venda') if PERFIL=='caixa' else permitir('financeiro')
     valor=centavos(valor)
+    taxa_centavos=int(taxa_centavos or 0)
+    if taxa_centavos<0: raise ErroGestao('Taxa inválida.')
     chave_operacao=chave_operacao or uuid.uuid4().hex
     with transacao() as c:
         existente=c.execute('SELECT id FROM pagamentos_fiado WHERE chave_operacao=?',(chave_operacao,)).fetchone()
@@ -364,23 +368,30 @@ def receber_fiado(cliente_id, valor, observacao='', forma_pagamento='dinheiro', 
             if principal:
                 enc=round(t['encargos_centavos']*principal/t['saldo_centavos']) if cobrar_encargos else 0
                 alocacoes.append((t['id'],principal,enc)); encargos+=enc; restante-=principal
-        pid=c.execute("INSERT INTO pagamentos_fiado(cliente_id,valor,forma_pagamento,observacao,tipo,encargos_centavos,chave_operacao,usuario) VALUES(?,?,?,?,'recebimento',?,?,?)",
-                      (cliente_id,valor/100,forma_pagamento,observacao,encargos,chave_operacao,USUARIO)).lastrowid
+        pid=c.execute("INSERT INTO pagamentos_fiado(cliente_id,valor,forma_pagamento,observacao,tipo,encargos_centavos,taxa_centavos,chave_operacao,usuario) VALUES(?,?,?,?,'recebimento',?,?,?,?)",
+                      (cliente_id,valor/100,forma_pagamento,observacao,encargos,taxa_centavos,chave_operacao,USUARIO)).lastrowid
         for tid,principal,enc in alocacoes:
             c.execute('UPDATE titulos_receber SET recebido_centavos=recebido_centavos+? WHERE id=?',(principal,tid))
             c.execute('INSERT INTO recebimentos_titulos(titulo_id,pagamento_id,principal_centavos,encargos_centavos) VALUES(?,?,?,?)',(tid,pid,principal,enc))
-        mid=entrada_pagamento(c,forma_pagamento,valor+encargos,'fiado',pid)
+        # A taxa (cartao/pix/voucher) e cobrada do cliente: entra no bruto recebido
+        # e o movimento/recebivel liquido fica igual ao que quitou a divida.
+        mid=entrada_pagamento(c,forma_pagamento,valor+encargos+taxa_centavos,'fiado',pid,taxa=taxa_centavos)
         c.execute('UPDATE pagamentos_fiado SET movimento_id=? WHERE id=?',(mid,pid))
-        auditar(c,'recebimento','fiado',pid,{'principal':valor,'encargos':encargos,'dispensa':not cobrar_encargos})
+        auditar(c,'recebimento','fiado',pid,{'principal':valor,'encargos':encargos,'taxa':taxa_centavos,'dispensa':not cobrar_encargos})
         return pid
 
 
 def recibo_fiado(pid):
     r=consultar('SELECT p.*,c.nome FROM pagamentos_fiado p JOIN clientes c ON c.id=p.cliente_id WHERE p.id=?',(pid,))[0]
-    return (f'RECIBO DE PAGAMENTO #{pid}\nCliente: {r["nome"]}\nData: {r["data_hora"]}\n'
-            f'Principal: R$ {r["valor"]:.2f}\nEncargos: R$ {r["encargos_centavos"]/100:.2f}\n'
-            f'Total recebido: R$ {r["valor"]+r["encargos_centavos"]/100:.2f}\nForma: {r["forma_pagamento"]}\n'
-            f'Responsável: {r["usuario"]}\n{r["observacao"]}\nComprovante não fiscal.')
+    taxa=(r.get('taxa_centavos') or 0)/100
+    total=r['valor']+r['encargos_centavos']/100+taxa
+    linhas=[f'RECIBO DE PAGAMENTO #{pid}', f'Cliente: {r["nome"]}', f'Data: {r["data_hora"]}',
+            f'Principal: R$ {r["valor"]:.2f}', f'Encargos: R$ {r["encargos_centavos"]/100:.2f}']
+    if taxa:
+        linhas.append(f'Taxa {r["forma_pagamento"]}: R$ {taxa:.2f}')
+    linhas += [f'Total recebido: R$ {total:.2f}', f'Forma: {r["forma_pagamento"]}',
+               f'Responsável: {r["usuario"]}', r["observacao"], 'Comprovante não fiscal.']
+    return '\n'.join(linhas)
 
 
 def registrar_baixa(itens,motivo,observacao='',perda=False,responsavel=None,centro_custo=''):

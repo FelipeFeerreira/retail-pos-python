@@ -27,6 +27,11 @@ pyserial==3.5
 # Download oficial / arquivos:
 # https://pypi.org/project/pyserial/#files
 
+# Leitura de notas fiscais: extrai o XML embutido no PDF do DANFE
+pypdf==6.19.0
+# Download oficial / arquivos:
+# https://pypi.org/project/pypdf/#files
+
 # Integração com recursos do Windows e impressora térmica
 pywin32==312
 # Download oficial / arquivos:

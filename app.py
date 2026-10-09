@@ -1,3 +1,11 @@
+import os
+# Neste ambiente (Ubuntu/XWayland) o daemon de metodo de entrada (IBus) pode
+# ficar preso consumindo 100% de CPU. O Tkinter consulta o XIM a cada widget
+# criado, e cada consulta espera ~90ms por uma resposta do IBus, deixando a
+# interface extremamente lenta (dezenas de segundos para abrir). Como este
+# sistema nao usa teclado com metodo de entrada, desativamos o XIM para o Tk.
+os.environ['XMODIFIERS'] = '@im=none'
+
 import re
 import hashlib
 import tkinter as tk
@@ -15,6 +23,7 @@ from balanca import LeitorBalanca
 from gerar_catalogo import gerar_catalogo_xlsx
 from precificacao import gerar_planilha_entrada
 import importar_entrada as ientrada
+import importar_nfe as nfe
 import categorias as catmod
 from relatorio_xlsx import gerar_relatorio_xlsx
 import cascos
@@ -72,6 +81,15 @@ def _uppercase_ao_digitar(entry):
     entry.bind('<KeyRelease>', _ao_soltar_tecla, add='+')
 
 
+def _grab_set_safe(dlg):
+    """Torna o diálogo modal sem quebrar no Linux, onde a janela pode ainda
+    não estar visível quando grab_set() é chamado logo após a criação."""
+    try:
+        dlg.grab_set()
+    except tk.TclError:
+        pass
+
+
 def _preencher_tree(tree, linhas, tag_por_linha=None):
     """Preenche uma Treeview com zebra-striping automático, preservando tags extras
     (como 'zero'/'baixo' de estoque) — a zebra some quando a linha já tem outra tag."""
@@ -86,12 +104,17 @@ def _preencher_tree(tree, linhas, tag_por_linha=None):
 
 class App(GestaoMixin, tk.Tk):
     def __init__(self):
-        super().__init__()
+        # className define o WM_CLASS da janela, para o icone correto aparecer
+        # e agrupar na barra de tarefas (dock) do Ubuntu.
+        super().__init__(className='Mercadinho')
+        # Monta toda a interface com a janela oculta: o Tkinter recalcula o layout
+        # a cada widget criado enquanto a janela esta visivel, o que deixava a
+        # abertura do sistema muito lenta. So exibimos no final.
+        self.withdraw()
         _aplicar_paleta()
         self.title(T('sistema'))
         self.minsize(1000, 600)
         self.configure(bg=COR['papel'])
-        self._tela_cheia()
         self.bind('<F11>', self._alternar_tela_cheia_total)
         self.bind('<Escape>', self._sair_tela_cheia_total)
         self._sem_bordas = False
@@ -142,6 +165,9 @@ class App(GestaoMixin, tk.Tk):
         self._montar_gestao()
         self._atalhos()
         self._relogio()
+        self.deiconify()
+        self._tela_cheia()
+        self.lift()
         self.after(1000, self._tarefas_30min)
         self.after(200, self._login_gestao)
         self.entrada.focus_set()
@@ -162,7 +188,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.title('Configurar balança')
         dlg.geometry('560x380')
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
         tk.Label(dlg, text='Porta (COM)', font=('Arial', 11, 'bold')).pack(anchor='w', padx=20, pady=(20, 5))
@@ -289,6 +315,7 @@ class App(GestaoMixin, tk.Tk):
         ar.add_separator()
         ar.add_command(label=T('gerar_planilha_entrada'), command=self._gerar_entrada_mercadoria)
         ar.add_command(label=T('importar_entrada'), command=self._importar_entrada_mercadoria)
+        ar.add_command(label=T('importar_nfe'), command=self._importar_nfe)
         ar.add_command(label=T('revisar_categorias'), command=self._revisar_categorias)
         ar.add_command(label=T('exportar_relatorio'), command=self._exportar_relatorio)
         ar.add_separator()
@@ -338,7 +365,7 @@ class App(GestaoMixin, tk.Tk):
             (self.tab_config, 'tab_configuracoes')
         ]):
             self.nb.add(tab, text=f' {T(nome)} ')
-        self.nb.bind('<<NotebookTabChanged>>', lambda e: self._aba_atualizada())
+        self.nb.bind('<<NotebookTabChanged>>', lambda e: self._atualizar_aba_selecionada())
 
     def _config_taxas(self):
         conf = carregar_config()
@@ -433,8 +460,26 @@ class App(GestaoMixin, tk.Tk):
         tk.Label(bloco_aparencia, text=T('nota_reiniciar'), bg=COR['branco'], fg=COR['cinza'],
                  font=(FONTE, 8), wraplength=560, justify='left').pack(anchor='w', padx=20, pady=(8, 16))
 
+        bloco_vendas = tk.Frame(p, bg=COR['branco'], highlightbackground=COR['linha'], highlightthickness=1)
+        bloco_vendas.grid(row=4, column=0, sticky='ew', pady=(16, 0))
+        tk.Label(bloco_vendas, text='Vendas', bg=COR['branco'], fg=COR['verde2'],
+                 font=(FONTE, 13, 'bold')).pack(anchor='w', padx=20, pady=(16, 10))
+        permitir_neg_var = tk.BooleanVar(value=bool(g.config('permitir_estoque_negativo', False)))
+        def _toggle_estoque_negativo():
+            try:
+                g.salvar_config('permitir_estoque_negativo', bool(permitir_neg_var.get()))
+                self._toast(T('preferencias_salvas'))
+            except Exception as exc:
+                messagebox.showerror('Erro', str(exc))
+        tk.Checkbutton(bloco_vendas, text=T('vender_sem_estoque'), variable=permitir_neg_var,
+                       bg=COR['branco'], fg=COR['verde2'], activebackground=COR['branco'],
+                       selectcolor=COR['branco'], font=(FONTE, 10),
+                       command=_toggle_estoque_negativo).pack(anchor='w', padx=20)
+        tk.Label(bloco_vendas, text=T('vender_sem_estoque_dica'), bg=COR['branco'], fg=COR['cinza'],
+                 font=(FONTE, 8), wraplength=560, justify='left').pack(anchor='w', padx=20, pady=(2, 16))
+
         bloco_seguranca = tk.Frame(p, bg=COR['branco'], highlightbackground=COR['linha'], highlightthickness=1)
-        bloco_seguranca.grid(row=4, column=0, sticky='ew', pady=(16, 0))
+        bloco_seguranca.grid(row=5, column=0, sticky='ew', pady=(16, 0))
         tk.Label(bloco_seguranca, text=T('seguranca'), bg=COR['branco'], fg=COR['verde2'],
                  font=(FONTE, 13, 'bold')).pack(anchor='w', padx=20, pady=(16, 10))
         ttk.Button(bloco_seguranca, text=T('alterar_senha') if self._senha_configurada() else T('definir_senha'),
@@ -471,7 +516,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('380x300')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
         tk.Label(dlg, text='Editar voucher' if voucher else 'Novo voucher', bg=COR['branco'], fg=COR['verde2'], font=(FONTE, 14, 'bold')).pack(anchor='w', padx=22, pady=(14, 10))
@@ -911,7 +956,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('520x520')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
         tk.Label(dlg, text='Selecionar cliente', bg=COR['branco'], fg=COR['verde2'], font=(FONTE, 14, 'bold')).pack(anchor='w', padx=20, pady=(14, 8))
@@ -979,7 +1024,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('640x790')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
@@ -1031,7 +1076,7 @@ class App(GestaoMixin, tk.Tk):
             self._selecionar_cliente()
             label_cli_modal.config(text=self.cliente_fiado['nome'] if self.cliente_fiado else 'Nenhum')
             dlg.lift()
-            dlg.grab_set()
+            _grab_set_safe(dlg)
         ttk.Button(frame_cli, text='Selecionar / novo', style='Secondary.TButton', command=escolher_cliente_no_modal).pack(side='right')
 
         tk.Label(dlg, text='DESCONTO NO TOTAL', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).pack(anchor='w', padx=24, pady=(14, 3))
@@ -1252,7 +1297,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('640x720')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
@@ -1442,7 +1487,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('460x680')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.resizable(False, False)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
@@ -1605,7 +1650,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('460x340')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.resizable(False, False)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
@@ -1672,7 +1717,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('760x600')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
@@ -1773,7 +1818,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('420x420')
         dlg.configure(bg=COR['branco'])
         dlg.transient(dlg_pai)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.resizable(False, False)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
@@ -1939,7 +1984,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('460x600')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.resizable(False, False)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
@@ -2028,7 +2073,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('640x680')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
@@ -2150,7 +2195,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('460x360')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.resizable(False, False)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
@@ -2232,7 +2277,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('420x420')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.resizable(False, False)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
@@ -2290,7 +2335,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('440x480')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.resizable(False, False)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
@@ -2355,7 +2400,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('480x620')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
@@ -2616,7 +2661,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('520x460')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
@@ -2677,7 +2722,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('480x480')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
@@ -3061,7 +3106,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('480x480')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
@@ -3371,7 +3416,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('560x560')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
@@ -3518,7 +3563,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('440x420')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.resizable(False, False)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
@@ -3591,7 +3636,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('740x600')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
@@ -4234,7 +4279,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('820x560')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
 
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
         tk.Label(dlg, text='Conferir a entrada de mercadoria', bg=COR['branco'], fg=COR['verde2'], font=(FONTE, 15, 'bold')).pack(anchor='w', padx=24, pady=(16, 4))
@@ -4286,6 +4331,97 @@ class App(GestaoMixin, tk.Tk):
         ttk.Button(botoes, text='CONFIRMAR E GRAVAR', style='Primary.TButton', command=confirmar).pack(side='right')
         ttk.Button(botoes, text='Cancelar', style='Secondary.TButton', command=dlg.destroy).pack(side='right', padx=(0, 8))
 
+    def _importar_nfe(self):
+        caminhos = filedialog.askopenfilenames(
+            title='Selecione a(s) nota(s) fiscal(is) — XML, ZIP ou PDF/DANFE',
+            filetypes=[('Notas fiscais', '*.xml *.zip *.pdf'),
+                       ('XML da NF-e', '*.xml'), ('DANFE (PDF)', '*.pdf'),
+                       ('Arquivo ZIP', '*.zip'), ('Todos os arquivos', '*.*')])
+        if not caminhos:
+            return
+        try:
+            plano = nfe.pre_visualizar(list(caminhos))
+        except Exception as exc:
+            messagebox.showerror('Erro ao ler a nota', str(exc))
+            return
+        if not plano['itens']:
+            messagebox.showinfo('Nada para importar', 'Não encontrei produtos nas notas selecionadas.')
+            return
+        self._modal_previsao_nfe(caminhos, plano)
+
+    def _modal_previsao_nfe(self, caminhos, plano):
+        dlg = tk.Toplevel(self)
+        dlg.title('Conferir nota fiscal (NF-e)')
+        dlg.geometry('960x620')
+        dlg.configure(bg=COR['branco'])
+        dlg.transient(self)
+        _grab_set_safe(dlg)
+
+        tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
+        tk.Label(dlg, text='Conferir a entrada pela nota fiscal', bg=COR['branco'], fg=COR['verde2'],
+                 font=(FONTE, 15, 'bold')).pack(anchor='w', padx=24, pady=(16, 4))
+        forn = ', '.join(plano['fornecedores'][:3]) + ('...' if len(plano['fornecedores']) > 3 else '')
+        tk.Label(dlg, text=f"{plano['total_notas']} nota(s) · {plano['total_itens']} item(ns) · "
+                           f"custo total {self._moeda(plano['total_custo'])} — nada foi gravado ainda",
+                 bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 9)).pack(anchor='w', padx=24)
+        tk.Label(dlg, text=f"Fornecedor(es): {forn}", bg=COR['branco'], fg=COR['cinza'],
+                 font=(FONTE, 9)).pack(anchor='w', padx=24, pady=(0, 8))
+
+        tv = ttk.Treeview(dlg, columns=('nota', 'produto', 'qtd', 'un', 'custo', 'venda', 'acao', 'avisos'),
+                          show='headings', height=15)
+        for c, t, w, anc in [('nota', 'Nota', 70, 'w'), ('produto', 'Produto', 240, 'w'),
+                             ('qtd', 'Qtd', 70, 'e'), ('un', 'Un', 42, 'center'),
+                             ('custo', 'Custo un.', 80, 'e'), ('venda', 'Venda sug.', 85, 'e'),
+                             ('acao', 'Ação', 82, 'w'), ('avisos', 'Avisos', 210, 'w')]:
+            tv.heading(c, text=t)
+            tv.column(c, width=w, anchor=anc)
+        tv.tag_configure('par', background=COR['branco'])
+        tv.tag_configure('impar', background=COR['zebra'])
+        tv.tag_configure('alerta', background=COR['amareloclaro'], foreground=COR['ambar'])
+        tv.tag_configure('novo', background=COR['verdeclaro'], foreground=COR['verde2'])
+        tv.pack(fill='both', expand=True, padx=24, pady=(0, 8))
+        sc = ttk.Scrollbar(dlg, orient='vertical', command=tv.yview)
+        tv.configure(yscrollcommand=sc.set)
+
+        for i, it in enumerate(plano['itens']):
+            if it['acao'] == 'cadastrar':
+                tag = 'novo'
+            elif it['avisos']:
+                tag = 'alerta'
+            else:
+                tag = 'par' if i % 2 == 0 else 'impar'
+            venda = self._moeda(it['preco_venda_sugerido']) if it['preco_venda_sugerido'] else '—'
+            tv.insert('', 'end', tags=(tag,), values=(
+                it['documento'], it['nome'], self._formatq(it['quantidade'], it['unidade']),
+                it['unidade'], self._moeda(it['custo_unitario']), venda,
+                'Cadastrar' if it['acao'] == 'cadastrar' else 'Atualizar',
+                '; '.join(it['avisos']) or '—'))
+
+        aplicar_preco = tk.BooleanVar(value=False)
+        tk.Checkbutton(dlg, text='Aplicar também o preço de venda sugerido nos produtos que já existem',
+                       variable=aplicar_preco, bg=COR['branco'], fg=COR['cinza'], activebackground=COR['branco'],
+                       selectcolor=COR['branco'], font=(FONTE, 9)).pack(anchor='w', padx=24)
+
+        def confirmar():
+            try:
+                resultado = nfe.aplicar(caminhos, plano, aplicar_preco.get())
+            except Exception as exc:
+                messagebox.showerror('Erro ao importar a nota', str(exc), parent=dlg)
+                return
+            dlg.destroy()
+            msg = (f"{resultado['notas']} nota(s) importada(s).\n"
+                   f"{len(resultado['cadastrados'])} produto(s) novo(s) cadastrado(s).")
+            if resultado['avisos']:
+                msg += '\n\n⚠ ' + '\n⚠ '.join(resultado['avisos'][:6])
+            msg += f"\n\nBackup do banco salvo em:\n{resultado['backup']}"
+            messagebox.showinfo('Nota importada', msg)
+            self._aba_atualizada()
+
+        botoes = tk.Frame(dlg, bg=COR['branco'])
+        botoes.pack(fill='x', padx=24, pady=(6, 20), side='bottom')
+        ttk.Button(botoes, text='CONFIRMAR E GRAVAR', style='Primary.TButton', command=confirmar).pack(side='right')
+        ttk.Button(botoes, text='Cancelar', style='Secondary.TButton', command=dlg.destroy).pack(side='right', padx=(0, 8))
+
     def _revisar_categorias(self):
         resultado = catmod.analisar()
         if not resultado['mudancas']:
@@ -4299,7 +4435,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('640x520')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
 
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
         tk.Label(dlg, text='Categorias pra ajustar', bg=COR['branco'], fg=COR['verde2'], font=(FONTE, 15, 'bold')).pack(anchor='w', padx=24, pady=(16, 4))
@@ -4538,14 +4674,39 @@ class App(GestaoMixin, tk.Tk):
         tk.Label(cab, text='Histórico de vendas', bg=COR['papel'], fg=COR['verde2'], font=(FONTE, 20, 'bold')).pack(side='left')
         tk.Label(cab, text='dê 2 cliques numa venda pra ver os itens e reimprimir o recibo', bg=COR['papel'],
                  fg=COR['cinza'], font=(FONTE, 9)).pack(side='left', padx=(14, 0))
-        ttk.Button(cab, text='Atualizar', style='Secondary.TButton', command=self._carrega_hist).pack(side='right')
+        ttk.Button(cab, text='Atualizar', style='Secondary.TButton', command=self._atualizar_hist).pack(side='right')
+
+        # Resumo de recebimentos separado por forma de pagamento (dinheiro, pix,
+        # débito, crédito, voucher...), com filtro de período.
+        self.hist_periodo = tk.StringVar(value='hoje')
+        self.hist_filtro = tk.StringVar(value='Todas')
+        painel = tk.Frame(p, bg=COR['papel'])
+        painel.grid(row=1, column=0, sticky='ew', pady=(0, 12))
+        painel.columnconfigure(0, weight=1)
+        topo = tk.Frame(painel, bg=COR['papel'])
+        topo.grid(row=0, column=0, sticky='ew')
+        tk.Label(topo, text='Recebido por forma de pagamento', bg=COR['papel'], fg=COR['verde2'],
+                 font=(FONTE, 12, 'bold')).pack(side='left')
+        for texto, valor in [('Tudo', 'tudo'), ('Mês', 'mes'), ('Semana', 'semana'), ('Hoje', 'hoje')]:
+            ttk.Radiobutton(topo, text=texto, value=valor, variable=self.hist_periodo,
+                            command=self._carrega_resumo_hist).pack(side='right', padx=(10, 0))
+        tk.Label(topo, text='Filtrar vendas:', bg=COR['papel'], fg=COR['cinza'],
+                 font=(FONTE, 9)).pack(side='right', padx=(20, 4))
+        self.combo_hist_forma = ttk.Combobox(topo, textvariable=self.hist_filtro, state='readonly',
+                                             font=(FONTE, 9), width=12,
+                                             values=['Todas'] + [r for _, r in op.FORMAS_PAGAMENTO_VENDA] + ['Cartão'])
+        self.combo_hist_forma.pack(side='right')
+        self.combo_hist_forma.bind('<<ComboboxSelected>>', lambda e: self._carrega_hist())
+        self.frame_resumo_pag = tk.Frame(painel, bg=COR['papel'])
+        self.frame_resumo_pag.grid(row=1, column=0, sticky='ew', pady=(8, 0))
+
         tabela = tk.Frame(p, highlightbackground=COR['linha'], highlightthickness=1)
         tabela.grid(row=2, column=0, sticky='nsew')
         tabela.rowconfigure(0, weight=1)
         tabela.columnconfigure(0, weight=1)
         self.tvhist = ttk.Treeview(tabela, columns=('id', 'data', 'cliente', 'pag', 'valor'), show='headings')
         self.tvhist.grid(row=0, column=0, sticky='nsew')
-        larguras = {'id': 60, 'data': 160, 'cliente': 160, 'pag': 110, 'valor': 110}
+        larguras = {'id': 60, 'data': 160, 'cliente': 160, 'pag': 130, 'valor': 110}
         for c, t in [('id', '#'), ('data', 'Data/Hora'), ('cliente', 'Cliente'), ('pag', 'Pagamento'), ('valor', 'Total')]:
             self.tvhist.heading(c, text=t)
             self.tvhist.column(c, width=larguras[c], anchor='e' if c in ('id', 'valor') else 'w')
@@ -4556,14 +4717,60 @@ class App(GestaoMixin, tk.Tk):
         sch = ttk.Scrollbar(tabela, orient='vertical', command=self.tvhist.yview)
         sch.grid(row=0, column=1, sticky='ns')
         self.tvhist.configure(yscrollcommand=sch.set)
+        self._carrega_resumo_hist()
         self._carrega_hist()
+
+    def _atualizar_hist(self):
+        self._carrega_resumo_hist()
+        self._carrega_hist()
+
+    def _carrega_resumo_hist(self):
+        dados = op.resumo_por_forma_pagamento(self.hist_periodo.get())
+        for w in self.frame_resumo_pag.winfo_children():
+            w.destroy()
+        if not dados['itens']:
+            tk.Label(self.frame_resumo_pag, text='Nenhuma venda registrada no período.', bg=COR['papel'],
+                     fg=COR['cinza'], font=(FONTE, 10)).pack(anchor='w', pady=6)
+            return
+        for item in dados['itens']:
+            fiado = item['forma'] == 'fiado'
+            card = tk.Frame(self.frame_resumo_pag, bg=COR['branco'],
+                            highlightbackground=COR['linha'], highlightthickness=1)
+            card.pack(side='left', fill='y', padx=(0, 8))
+            tk.Label(card, text=item['rotulo'].upper(), bg=COR['branco'], fg=COR['cinza'],
+                     font=(FONTE, 8, 'bold')).pack(anchor='w', padx=12, pady=(8, 0))
+            tk.Label(card, text=self._moeda(item['total']), bg=COR['branco'],
+                     fg=COR['ambar'] if fiado else COR['verde2'],
+                     font=('Consolas', 14, 'bold')).pack(anchor='w', padx=12)
+            legenda = f"{item['n']} venda(s)" + (' · a receber' if fiado else '')
+            tk.Label(card, text=legenda, bg=COR['branco'], fg=COR['cinza'],
+                     font=(FONTE, 8)).pack(anchor='w', padx=12, pady=(0, 8))
+        total = tk.Frame(self.frame_resumo_pag, bg=COR['verdeclaro'],
+                         highlightbackground=COR['linha'], highlightthickness=1)
+        total.pack(side='left', fill='y')
+        tk.Label(total, text='TOTAL DO PERÍODO', bg=COR['verdeclaro'], fg=COR['verde2'],
+                 font=(FONTE, 8, 'bold')).pack(anchor='w', padx=12, pady=(8, 0))
+        tk.Label(total, text=self._moeda(dados['total']), bg=COR['verdeclaro'], fg=COR['verde2'],
+                 font=('Consolas', 14, 'bold')).pack(anchor='w', padx=12)
+        tk.Label(total, text='inclui fiado (a receber)', bg=COR['verdeclaro'], fg=COR['cinza'],
+                 font=(FONTE, 8)).pack(anchor='w', padx=12, pady=(0, 8))
 
     def _carrega_hist(self):
         self.tvhist.delete(*self.tvhist.get_children())
+        filtro = getattr(self, 'hist_filtro', None)
+        filtro_atual = filtro.get() if filtro else 'Todas'
+        chave_filtro = next((k for k, r in op.FORMAS_PAGAMENTO_VENDA if r == filtro_atual), None)
+        if chave_filtro is None and filtro_atual == 'Cartão':
+            chave_filtro = 'cartao'
         for i, venda in enumerate(op.listar_vendas()):
+            if chave_filtro and venda['forma_pagamento'] != chave_filtro:
+                continue
+            rotulo = op.rotulo_forma_pagamento(venda['forma_pagamento'])
+            if venda.get('voucher_marca'):
+                rotulo += f" {venda['voucher_marca']}"
             tag = 'fiado' if venda['forma_pagamento'] == 'fiado' else ('par' if i % 2 == 0 else 'impar')
             self.tvhist.insert('', 'end', iid=str(venda['id']), tags=(tag,), values=(
-                venda['id'], venda['data_hora'], venda['cliente_nome'] or '—', venda['forma_pagamento'], self._moeda(venda['valor_total']) + (' CANCELADA' if venda.get('cancelada') else '')))
+                venda['id'], venda['data_hora'], venda['cliente_nome'] or '—', rotulo, self._moeda(venda['valor_total']) + (' CANCELADA' if venda.get('cancelada') else '')))
 
     # --- Estoque/Validades ---
     def _carrega_estoque(self):
@@ -4619,7 +4826,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('420x480')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.resizable(False, False)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
@@ -4721,7 +4928,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('420x440')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.resizable(False, False)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
@@ -4860,7 +5067,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('460x520')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
 
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
@@ -4992,7 +5199,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('500x600')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
         tk.Label(dlg, text='Atalhos do teclado', bg=COR['branco'], fg=COR['verde2'], font=(FONTE, 15, 'bold')).pack(anchor='w', padx=24, pady=(16, 10))
@@ -5028,6 +5235,21 @@ class App(GestaoMixin, tk.Tk):
         ttk.Button(dlg, text='Fechar', style='Primary.TButton', command=dlg.destroy).pack(fill='x', padx=24, pady=(0, 20))
 
     def _relogio(self):
+        agora = datetime.now()
+        ultimo = getattr(self, '_ultimo_relogio', None)
+        self._ultimo_relogio = agora
+        if ultimo is not None:
+            atraso = (agora - ultimo).total_seconds()
+            # Se o relogio (que roda a cada 1s) atrasou muito, a interface ficou
+            # travada nesse intervalo. Registra para diagnostico.
+            if atraso > 2.5:
+                try:
+                    import tempfile
+                    destino = os.path.join(tempfile.gettempdir(), 'mercadinho_travamentos.log')
+                    with open(destino, 'a', encoding='utf-8') as f:
+                        f.write(f'{agora.isoformat(timespec="seconds")}  interface travada por ~{atraso:.1f}s\n')
+                except Exception:
+                    pass
         self.status.config(text=self._texto_status())
         self.after(1000, self._relogio)
 
@@ -5036,7 +5258,7 @@ class App(GestaoMixin, tk.Tk):
             if hasattr(self,'painel_financeiro'): self._atualizar_financeiro()
             self._carrega_painel()
             self._carrega_analises()
-            self._carrega_hist()
+            self._atualizar_hist()
             self._carrega_clientes()
             self._carrega_produtos()
             self._carrega_resumo_consumo()
@@ -5051,6 +5273,35 @@ class App(GestaoMixin, tk.Tk):
             elif aba == str(self.tab_perdas):
                 self.entrada_perda.focus_set()
             elif aba == str(self.tab_caixa):
+                self.entrada.focus_set()
+        except Exception:
+            pass
+
+    def _atualizar_aba_selecionada(self):
+        """Atualiza somente os dados da aba que ficou visivel. Evita recarregar
+        as 12 abas a cada troca de aba (que deixava a navegacao lenta)."""
+        try:
+            aba = str(self.nb.select())
+            mapa = {
+                str(getattr(self, 'tab_prod', '')): (self._carrega_produtos,),
+                str(getattr(self, 'tab_cli', '')): (self._carrega_clientes,),
+                str(getattr(self, 'tab_consumo', '')): (self._carrega_resumo_consumo, self._carrega_historico_consumo),
+                str(getattr(self, 'tab_perdas', '')): (self._carrega_resumo_perda, self._carrega_historico_perda),
+                str(getattr(self, 'tab_producao', '')): (self._carrega_producao,),
+                str(getattr(self, 'tab_pain', '')): (self._carrega_painel,),
+                str(getattr(self, 'tab_analises', '')): (self._carrega_analises,),
+                str(getattr(self, 'tab_hist', '')): (self._atualizar_hist,),
+                str(getattr(self, 'tab_estoque', '')): (self._carrega_estoque,),
+            }
+            for fn in mapa.get(aba, ()):
+                fn()
+            if hasattr(self, 'painel_financeiro') and aba == str(getattr(self, 'tab_fin', '')):
+                self._atualizar_financeiro()
+            if aba == str(getattr(self, 'tab_consumo', '')):
+                self.entrada_consumo.focus_set()
+            elif aba == str(getattr(self, 'tab_perdas', '')):
+                self.entrada_perda.focus_set()
+            elif aba == str(getattr(self, 'tab_caixa', '')):
                 self.entrada.focus_set()
         except Exception:
             pass
@@ -5091,7 +5342,7 @@ class App(GestaoMixin, tk.Tk):
             dlg.configure(bg=COR['branco'])
             dlg.resizable(False, False)
             dlg.transient(self)
-            dlg.grab_set()
+            _grab_set_safe(dlg)
             dlg.bind('<Escape>', lambda e: (dlg.destroy(), self._fechar()))
             tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
             tk.Label(dlg, text=T('administrador'), bg=COR['branco'], fg=COR['verde2'],
@@ -5135,7 +5386,7 @@ class App(GestaoMixin, tk.Tk):
         dlg.geometry('400x300' if alterar else '400x260')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
-        dlg.grab_set()
+        _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
         tk.Label(dlg, text=T('alterar_senha') if alterar else T('definir_senha'),
@@ -5281,5 +5532,30 @@ class App(GestaoMixin, tk.Tk):
         self.destroy()
 
 
+def _bloquear_instancia_unica():
+    """Garante que so exista uma copia do sistema aberta.
+
+    Duas instancias acessando o mesmo SQLite fazem as operacoes travarem
+    (espera de lock). Se ja houver uma aberta, avisa e encerra esta.
+    """
+    import fcntl
+    import subprocess
+    import sys
+    import tempfile
+    caminho = os.path.join(tempfile.gettempdir(), 'mercadinho.lock')
+    arq = open(caminho, 'w')
+    try:
+        fcntl.flock(arq, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            subprocess.Popen(['notify-send', '-a', 'Mercadinho',
+                              'O Sistema do Mercadinho ja esta aberto.'])
+        except Exception:
+            pass
+        sys.exit(0)
+    return arq
+
+
 if __name__ == '__main__':
+    _trava_instancia = _bloquear_instancia_unica()
     App().mainloop()

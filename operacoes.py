@@ -138,12 +138,70 @@ def registrar_venda(itens,forma_pagamento='dinheiro',desconto=0,cliente_id=None,
         raise ErroOperacao(str(exc)) from exc
 
 
-def listar_vendas(data=None,limite=200):
+# Formas de pagamento usadas nas vendas, na ordem em que aparecem no resumo
+# do histórico. 'fiado' fica por último porque não é dinheiro recebido — é a receber.
+FORMAS_PAGAMENTO_VENDA = [
+    ('dinheiro', 'Dinheiro'),
+    ('pix', 'Pix'),
+    ('cartao_debito', 'Débito'),
+    ('cartao_credito', 'Crédito'),
+    ('voucher', 'Voucher'),
+    ('fiado', 'Fiado'),
+]
+ROTULOS_PAGAMENTO = dict(FORMAS_PAGAMENTO_VENDA)
+ROTULOS_PAGAMENTO['cartao'] = 'Cartão'
+
+
+def rotulo_forma_pagamento(forma):
+    """Nome amigável da forma de pagamento (evita mostrar 'cartao_debito' cru
+    no histórico). Formas desconhecidas caem num rótulo legível."""
+    return ROTULOS_PAGAMENTO.get(forma) or (forma or '').replace('_', ' ').strip().capitalize() or '—'
+
+
+def resumo_por_forma_pagamento(periodo='hoje'):
+    """Totais de vendas separados por forma de pagamento (dinheiro, pix, débito,
+    crédito, voucher, fiado...) no período pedido, pra identificar de relance
+    quanto entrou em cada meio de pagamento. 'periodo' pode ser
+    'hoje', 'semana', 'mes' ou 'tudo'."""
+    hoje=date.today()
+    cond, params='', []
+    if periodo=='hoje':
+        cond='AND date(v.data_hora)=?'; params=[hoje.isoformat()]
+    elif periodo=='semana':
+        cond='AND date(v.data_hora) BETWEEN ? AND ?'
+        params=[(hoje-timedelta(days=hoje.weekday())).isoformat(), hoje.isoformat()]
+    elif periodo=='mes':
+        cond='AND date(v.data_hora) BETWEEN ? AND ?'
+        params=[hoje.replace(day=1).isoformat(), hoje.isoformat()]
+    conn=db.get_conn()
+    try:
+        rows=conn.execute(
+            f'''SELECT v.forma_pagamento AS forma, COUNT(*) AS n,
+                       COALESCE(SUM(v.valor_total),0) AS total,
+                       COALESCE(SUM(v.taxa_paga),0) AS taxa
+                FROM vendas v WHERE v.cancelada=0 {cond}
+                GROUP BY v.forma_pagamento''', params).fetchall()
+        por_forma={r['forma']: {'forma':r['forma'],'n':r['n'],'total':round(r['total'],2),'taxa':round(r['taxa'],2)} for r in rows}
+        itens=[]
+        for chave, rotulo in FORMAS_PAGAMENTO_VENDA:
+            d=por_forma.pop(chave, None)
+            if d: d['rotulo']=rotulo; itens.append(d)
+        for chave, d in sorted(por_forma.items(), key=lambda kv:-kv[1]['total']):
+            d['rotulo']=rotulo_forma_pagamento(chave); itens.append(d)
+        return {'itens':itens,'total':round(sum(i['total'] for i in itens),2),'periodo':periodo}
+    finally: conn.close()
+
+
+def listar_vendas(data=None,limite=200,forma_pagamento=None):
     conn=db.get_conn()
     try:
         sql='SELECT v.*,c.nome AS cliente_nome FROM vendas v LEFT JOIN clientes c ON c.id=v.cliente_id'
-        rows=conn.execute(sql+' WHERE date(v.data_hora)=? ORDER BY v.data_hora DESC',(data,)).fetchall() if data else conn.execute(sql+' ORDER BY v.data_hora DESC LIMIT ?',(limite,)).fetchall()
-        return [dict(r) for r in rows]
+        conds, params=[], []
+        if data: conds.append('date(v.data_hora)=?'); params.append(data)
+        if forma_pagamento: conds.append('v.forma_pagamento=?'); params.append(forma_pagamento)
+        if conds: sql+=' WHERE '+' AND '.join(conds)
+        sql+=' ORDER BY v.data_hora DESC LIMIT ?'; params.append(limite)
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
     finally: conn.close()
 
 def detalhar_venda(venda_id):

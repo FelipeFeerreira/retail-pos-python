@@ -10,6 +10,7 @@ from tkinter import ttk, messagebox, simpledialog, filedialog
 import uuid
 import gestao as g
 import operacoes as op
+import analises as an
 import database as db
 
 
@@ -280,6 +281,14 @@ class GestaoMixin:
         if d['sem_custo']:
             linhas=[('Margem bruta: indisponível — custos históricos incompletos' if l.startswith('Margem bruta:') else 'Resultado gerencial: indisponível — custos históricos incompletos' if l.startswith('Resultado gerencial:') else l) for l in linhas]
             linhas+=['',f"ATENÇÃO: {d['sem_custo']} item(ns) antigo(s) sem custo histórico. O CMV acima é somente o valor documentado, não o custo completo do período."]
+        formas=an.vendas_por_forma_pagamento(inicio,fim)
+        if formas:
+            linhas+=['','RECEBIDO POR FORMA DE PAGAMENTO (vendas do período)']
+            for f in formas:
+                if f['forma']=='fiado': extra=' — a receber'
+                elif f['taxas']: extra=f" — líquido {self._moeda(f['liquido'])}"
+                else: extra=''
+                linhas.append(f"{f['rotulo']}: {self._moeda(f['total'])} ({f['pct']:.1f}% · {f['n']} venda(s)){extra}")
         linhas+=['','Este demonstrativo gerencial depende da classificação completa das despesas; não substitui a apuração contábil/fiscal.']
         self.dre_texto.config(state='normal'); self.dre_texto.delete('1.0','end'); self.dre_texto.insert('1.0','\n'.join(linhas)); self.dre_texto.config(state='disabled')
 

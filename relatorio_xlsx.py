@@ -434,7 +434,7 @@ def _aba_pagamento(wb, inicio, fim, rotulo):
                        [20, 12, 16, 13, 16, 18])
     primeira = linha
     for f in dados:
-        ws.cell(row=linha, column=1, value=f['forma'])
+        ws.cell(row=linha, column=1, value=f.get('rotulo') or f['forma'])
         ws.cell(row=linha, column=2, value=f['n'])
         ws.cell(row=linha, column=3, value=f['total'])
         ws.cell(row=linha, column=4, value=f['pct'])

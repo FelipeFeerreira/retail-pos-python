@@ -3840,6 +3840,13 @@ class App(GestaoMixin, tk.Tk):
         self.lista_val_painel = tk.Frame(bloco_val, bg=COR['branco'])
         self.lista_val_painel.pack(fill='both', expand=True, padx=16, pady=(0, 16))
 
+        bloco_pag_painel = tk.Frame(p, bg=COR['branco'], highlightbackground=COR['linha'], highlightthickness=1)
+        bloco_pag_painel.grid(row=3, column=0, columnspan=3, sticky='ew', pady=(12, 0))
+        tk.Label(bloco_pag_painel, text='Recebido por forma de pagamento (hoje)', bg=COR['branco'], fg=COR['verde2'],
+                 font=(FONTE, 12, 'bold')).pack(anchor='w', padx=16, pady=(12, 6))
+        self.lista_pag_painel = tk.Frame(bloco_pag_painel, bg=COR['branco'])
+        self.lista_pag_painel.pack(fill='x', padx=16, pady=(0, 12))
+
         self._carrega_painel()
 
     def _carrega_painel(self):
@@ -3901,6 +3908,24 @@ class App(GestaoMixin, tk.Tk):
         else:
             tk.Label(self.lista_val_painel, text='Nada vencendo nos próximos 7 dias 🎉', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 10)).pack(pady=10)
 
+        if hasattr(self, 'lista_pag_painel'):
+            for w in self.lista_pag_painel.winfo_children():
+                w.destroy()
+            pag = op.resumo_por_forma_pagamento('hoje')
+            if pag['itens']:
+                for item in pag['itens']:
+                    fiado = item['forma'] == 'fiado'
+                    card = tk.Frame(self.lista_pag_painel, bg=COR['papel'])
+                    card.pack(side='left', padx=(0, 12))
+                    tk.Label(card, text=item['rotulo'], bg=COR['papel'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).pack(anchor='w')
+                    tk.Label(card, text=self._moeda(item['total']), bg=COR['papel'],
+                             fg=COR['ambar'] if fiado else COR['verde2'], font=('Consolas', 13, 'bold')).pack(anchor='w')
+                    tk.Label(card, text=f"{item['n']} venda(s)" + (' · a receber' if fiado else ''), bg=COR['papel'],
+                             fg=COR['cinza'], font=(FONTE, 8)).pack(anchor='w')
+            else:
+                tk.Label(self.lista_pag_painel, text='Nenhuma venda hoje ainda.', bg=COR['branco'],
+                         fg=COR['cinza'], font=(FONTE, 10)).pack(anchor='w', pady=4)
+
     def _montar_analises(self):
         p = self.tab_analises
         p.columnconfigure(0, weight=1)
@@ -3915,6 +3940,14 @@ class App(GestaoMixin, tk.Tk):
         sel.pack(side='right', padx=(0, 12))
         for texto, valor in [('Hoje', 'hoje'), ('7 dias', '7dias'), ('30 dias', '30dias'), ('Este mês', 'mes'), ('Tudo', 'tudo')]:
             ttk.Radiobutton(sel, text=texto, value=valor, variable=self.periodo_analise, command=self._carrega_analises).pack(side='left', padx=3)
+        self.forma_analise = tk.StringVar(value='Todas')
+        self.combo_forma_analise = ttk.Combobox(sel, textvariable=self.forma_analise, state='readonly',
+                                                font=(FONTE, 9), width=11,
+                                                values=['Todas'] + [r for _, r in op.FORMAS_PAGAMENTO_VENDA] + ['Cartão'])
+        self.combo_forma_analise.pack(side='right', padx=(4, 0))
+        self.combo_forma_analise.bind('<<ComboboxSelected>>', lambda e: self._carrega_analises())
+        tk.Label(sel, text='Forma de pagamento:', bg=COR['papel'], fg=COR['cinza'],
+                 font=(FONTE, 9)).pack(side='right', padx=(16, 0))
 
         cards_frame = tk.Frame(p, bg=COR['papel'])
         cards_frame.grid(row=1, column=0, sticky='ew', pady=(0, 12))
@@ -3949,6 +3982,22 @@ class App(GestaoMixin, tk.Tk):
         canvas_corpo.bind('<Configure>', lambda e: canvas_corpo.itemconfig(janela_corpo, width=e.width))
         canvas_corpo.bind('<Enter>', lambda e: canvas_corpo.bind_all('<MouseWheel>', lambda ev: canvas_corpo.yview_scroll(int(-1 * (ev.delta / 120)), 'units')))
         canvas_corpo.bind('<Leave>', lambda e: canvas_corpo.unbind_all('<MouseWheel>'))
+
+        bloco_pag = tk.Frame(corpo, bg=COR['branco'], highlightbackground=COR['linha'], highlightthickness=1)
+        bloco_pag.pack(fill='x', pady=(0, 12))
+        cab_pag = tk.Frame(bloco_pag, bg=COR['branco'])
+        cab_pag.pack(fill='x', padx=16, pady=(16, 2))
+        tk.Label(cab_pag, text='Recebido por forma de pagamento', bg=COR['branco'], fg=COR['verde2'],
+                 font=(FONTE, 12, 'bold')).pack(side='left')
+        self.label_forma_analise = tk.Label(cab_pag, text='', bg=COR['branco'], fg=COR['ambar'], font=(FONTE, 9, 'bold'))
+        self.label_forma_analise.pack(side='right')
+        tk.Label(bloco_pag, text='Separa dinheiro, pix, débito, crédito, voucher e fiado. Escolha uma forma no topo pra filtrar TODAS as análises por esse meio de pagamento.',
+                 bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8)).pack(anchor='w', padx=16, pady=(0, 8))
+        self.lista_pag_analise = tk.Frame(bloco_pag, bg=COR['branco'])
+        self.lista_pag_analise.pack(fill='x', padx=16, pady=(0, 4))
+        self.canvas_pag = tk.Canvas(bloco_pag, bg=COR['branco'], height=170, highlightthickness=0)
+        self.canvas_pag.pack(fill='x', padx=16, pady=(4, 16))
+        self.canvas_pag.bind('<Configure>', lambda e: self._redesenhar_grafico_pag())
 
         bloco_tendencia = tk.Frame(corpo, bg=COR['branco'], highlightbackground=COR['linha'], highlightthickness=1)
         bloco_tendencia.pack(fill='x', pady=(0, 12))
@@ -4086,6 +4135,10 @@ class App(GestaoMixin, tk.Tk):
         dados = getattr(self, '_dados_grafico_hora', [])
         self._desenhar_barras(self.canvas_hora, dados, COR['amarelo'], formatar=lambda v: (str(int(v)) if v else ''))
 
+    def _redesenhar_grafico_pag(self):
+        dados = getattr(self, '_dados_grafico_pag', [])
+        self._desenhar_barras(self.canvas_pag, dados, COR['verde'], formatar=lambda v: self._moeda(v) if v else '')
+
     def _carrega_analises(self):
         if not hasattr(self, 'cards_an'):
             return
@@ -4093,15 +4146,26 @@ class App(GestaoMixin, tk.Tk):
         inicio, fim = an.periodo_preset(chave)
         self._periodo_atual = (inicio, fim)
 
-        resumo = an.resumo_periodo(inicio, fim)
+        filtro_forma = getattr(self, 'forma_analise', None)
+        filtro_forma = filtro_forma.get() if filtro_forma else 'Todas'
+        forma = next((k for k, r in op.FORMAS_PAGAMENTO_VENDA if r == filtro_forma), None)
+        if forma is None and filtro_forma == 'Cartão':
+            forma = 'cartao'
+        if hasattr(self, 'label_forma_analise'):
+            self.label_forma_analise.config(
+                text=f'Filtrando por: {filtro_forma}' if forma else '')
+
+        resumo = an.resumo_periodo(inicio, fim, forma=forma)
         self.cards_an['faturamento'].config(text=self._moeda(resumo['faturamento']))
         self.cards_an['numero_vendas'].config(text=str(resumo['numero_vendas']))
         self.cards_an['ticket_medio'].config(text=self._moeda(resumo['ticket_medio']))
         self.cards_an['lucro_estimado'].config(text=self._moeda(resumo['lucro_estimado']))
 
-        dias = an.vendas_por_dia_semana(inicio, fim)
+        self._carrega_formas_analise(inicio, fim)
+
+        dias = an.vendas_por_dia_semana(inicio, fim, forma=forma)
         self._dados_grafico_semana = [(d['abrev'], d['faturamento']) for d in dias]
-        melhor, pior = an.melhor_pior_dia(inicio, fim)
+        melhor, pior = an.melhor_pior_dia(inicio, fim, forma=forma)
         if melhor:
             self.label_melhor_dia.config(
                 text=f"Melhor dia: {melhor['nome']} ({self._moeda(melhor['faturamento'])} em {melhor['numero_vendas']} venda(s))"
@@ -4121,7 +4185,7 @@ class App(GestaoMixin, tk.Tk):
             'Fim de semana': (COR['zebra'], COR['cinza']),
             'Dia normal': (COR['branco'], COR['cinza']),
         }
-        for c in an.vendas_por_classe_dia(inicio, fim):
+        for c in an.vendas_por_classe_dia(inicio, fim, forma=forma):
             bg, fg = cores_classe.get(c['classe'], (COR['branco'], COR['cinza']))
             linha_c = tk.Frame(self.lista_tipo_dia, bg=bg, highlightbackground=COR['linha'], highlightthickness=1)
             linha_c.pack(fill='x', pady=2)
@@ -4144,7 +4208,7 @@ class App(GestaoMixin, tk.Tk):
         else:
             tk.Label(self.lista_eventos, text='Nada nos próximos 45 dias', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 9)).pack(anchor='w', pady=4)
 
-        horas = an.vendas_por_hora(inicio, fim)
+        horas = an.vendas_por_hora(inicio, fim, forma=forma)
         self._dados_grafico_hora = [(f"{h['hora']:02d}h", h['numero_vendas']) for h in horas]
         horas_com_venda = [h for h in horas if h['numero_vendas']]
         if horas_com_venda:
@@ -4158,7 +4222,7 @@ class App(GestaoMixin, tk.Tk):
 
         for w in self.lista_top_produtos.winfo_children():
             w.destroy()
-        top = an.produtos_mais_vendidos(inicio, fim, limite=15)
+        top = an.produtos_mais_vendidos(inicio, fim, limite=15, forma=forma)
         if top:
             for item in top:
                 linha = tk.Frame(self.lista_top_produtos, bg=COR['verdeclaro'])
@@ -4193,6 +4257,33 @@ class App(GestaoMixin, tk.Tk):
         else:
             self.label_custos_ocultos.config(text='Nenhuma perda ou consumo interno registrado nesse período.')
 
+    def _carrega_formas_analise(self, inicio, fim):
+        if not hasattr(self, 'lista_pag_analise'):
+            return
+        for w in self.lista_pag_analise.winfo_children():
+            w.destroy()
+        formas = an.vendas_por_forma_pagamento(inicio, fim)
+        self._dados_grafico_pag = [(f['rotulo'], f['total']) for f in formas]
+        self._redesenhar_grafico_pag()
+        if not formas:
+            tk.Label(self.lista_pag_analise, text='Nenhuma venda no período.', bg=COR['branco'],
+                     fg=COR['cinza'], font=(FONTE, 10)).pack(anchor='w', pady=6)
+            return
+        for i, f in enumerate(formas):
+            fiado = f['forma'] == 'fiado'
+            bg = COR['branco'] if i % 2 == 0 else COR['zebra']
+            fg = COR['ambar'] if fiado else COR['verde2']
+            linha = tk.Frame(self.lista_pag_analise, bg=bg)
+            linha.pack(fill='x', pady=1)
+            tk.Label(linha, text=f['rotulo'], bg=bg, fg=fg, font=(FONTE, 10, 'bold')).pack(side='left', padx=10, pady=6)
+            tk.Label(linha, text=f"{f['n']} venda(s)", bg=bg, fg=COR['cinza'], font=(FONTE, 9)).pack(side='left', padx=(0, 10))
+            if fiado:
+                tk.Label(linha, text='a receber', bg=bg, fg=COR['ambar'], font=(FONTE, 8, 'bold')).pack(side='left')
+            elif f['taxas']:
+                tk.Label(linha, text=f"líquido {self._moeda(f['liquido'])}", bg=bg, fg=COR['cinza'], font=(FONTE, 8)).pack(side='left')
+            tk.Label(linha, text=f"{self._moeda(f['total'])}  ({f['pct']:.1f}%)", bg=bg, fg=fg,
+                     font=('Consolas', 10, 'bold')).pack(side='right', padx=10)
+
     def _carrega_produtos_do_dia(self):
         if not hasattr(self, 'lista_produtos_dia'):
             return
@@ -4200,7 +4291,12 @@ class App(GestaoMixin, tk.Tk):
             w.destroy()
         dia_idx = self.combo_dia_semana.current()
         inicio, fim = getattr(self, '_periodo_atual', (None, None))
-        produtos = an.produtos_por_dia_semana(dia_idx, inicio, fim, limite=8)
+        filtro_forma = getattr(self, 'forma_analise', None)
+        filtro_forma = filtro_forma.get() if filtro_forma else 'Todas'
+        forma = next((k for k, r in op.FORMAS_PAGAMENTO_VENDA if r == filtro_forma), None)
+        if forma is None and filtro_forma == 'Cartão':
+            forma = 'cartao'
+        produtos = an.produtos_por_dia_semana(dia_idx, inicio, fim, limite=8, forma=forma)
         if produtos:
             for item in produtos:
                 linha = tk.Frame(self.lista_produtos_dia, bg=COR['amareloclaro'])

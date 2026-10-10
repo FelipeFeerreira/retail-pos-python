@@ -27,6 +27,7 @@ from datetime import date, datetime, timedelta
 import database as db
 import calendario as cal
 from categorias import CATEGORIAS as CATEGORIAS_PADRAO
+from operacoes import FORMAS_PAGAMENTO_VENDA, rotulo_forma_pagamento
 
 NOMES_DIA_SEMANA = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado']
 NOMES_DIA_SEMANA_ABREV = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb']
@@ -147,9 +148,12 @@ def rotulo_periodo(inicio, fim):
     return f'{br(inicio)} a {br(fim)}'
 
 
-def _filtro_data(inicio, fim, alias='v'):
+def _filtro_data(inicio, fim, alias='v', forma=None):
     """Monta a cláusula extra de WHERE (começando com AND) e a lista de parâmetros
-    pro filtro de período, usando o alias informado para a tabela vendas."""
+    pro filtro de período, usando o alias informado para a tabela vendas. Se
+    'forma' for informada, restringe a análise a uma forma de pagamento só
+    (dinheiro, pix, cartao_debito...) — é o filtro que permite analisar como
+    se comporta cada meio de pagamento separadamente."""
     clausulas, params = [f'{alias}.cancelada=0'], []
     if inicio:
         clausulas.append(f'date({alias}.data_hora) >= ?')
@@ -157,6 +161,9 @@ def _filtro_data(inicio, fim, alias='v'):
     if fim:
         clausulas.append(f'date({alias}.data_hora) <= ?')
         params.append(fim)
+    if forma:
+        clausulas.append(f'{alias}.forma_pagamento = ?')
+        params.append(forma)
     return (' AND ' + ' AND '.join(clausulas)) if clausulas else '', params
 
 
@@ -197,17 +204,18 @@ def intervalo_dados():
 # ----------------------------------------------------------------------
 # Resumos
 # ----------------------------------------------------------------------
-def resumo_periodo(inicio=None, fim=None):
+def resumo_periodo(inicio=None, fim=None, forma=None):
     """Faturamento, número de vendas, itens vendidos, ticket médio, lucro
     estimado (já descontando taxa de maquininha/voucher) e quantos dias
     tiveram movimento dentro do período.
 
     Vendas à vista e fiado entram na data da venda (competência).
     Recebimentos são mostrados separadamente no financeiro.
-    Custos anteriores à migração são estimados e sinalizados na interface."""
+    Custos anteriores à migração são estimados e sinalizados na interface.
+    'forma' restringe tudo a uma forma de pagamento (ex.: só Pix)."""
     conn = db.get_conn()
     try:
-        cond, params = _filtro_data(inicio, fim)
+        cond, params = _filtro_data(inicio, fim, forma=forma)
         taxa = _expr_taxa(conn)
         cond_pago = cond + " AND v.cancelada=0"
         r = conn.execute(
@@ -257,19 +265,20 @@ def resumo_periodo(inicio=None, fim=None):
 # ----------------------------------------------------------------------
 # Séries temporais: dia, semana, mês
 # ----------------------------------------------------------------------
-def serie_temporal(granularidade='dia', inicio=None, fim=None, limite=None):
+def serie_temporal(granularidade='dia', inicio=None, fim=None, limite=None, forma=None):
     """Evolução do faturamento agrupada por dia, semana ou mês.
 
     Vendas fiado entram na data da venda (competência). Cada item traz chave
     (ordenável), rótulo pra exibição, número de vendas, faturamento, ticket
-    médio, lucro estimado e o intervalo de datas do grupo."""
+    médio, lucro estimado e o intervalo de datas do grupo.
+    'forma' restringe a série a uma forma de pagamento."""
     if granularidade not in GRANULARIDADES:
         granularidade = 'dia'
     formato = {'dia': '%Y-%m-%d', 'semana': '%Y-%W', 'mes': '%Y-%m'}[granularidade]
 
     conn = db.get_conn()
     try:
-        cond, params = _filtro_data(inicio, fim)
+        cond, params = _filtro_data(inicio, fim, forma=forma)
         taxa = _expr_taxa(conn)
         cond_pago = cond + " AND v.cancelada=0"
         rows = conn.execute(
@@ -351,15 +360,16 @@ def _rotulo_grupo(granularidade, chave, primeiro, ultimo):
         return chave
 
 
-def vendas_por_dia_semana(inicio=None, fim=None):
+def vendas_por_dia_semana(inicio=None, fim=None, forma=None):
     """Pra cada dia da semana (0=Domingo...6=Sábado): quantas vendas, faturamento,
     ticket médio e a média por ocorrência daquele dia no período. Sempre devolve
     os 7 dias, mesmo os que não tiveram venda.
 
-    Vendas fiado entram no dia da venda (competência)."""
+    Vendas fiado entram no dia da venda (competência).
+    'forma' restringe a uma forma de pagamento (ex.: só cartão de débito)."""
     conn = db.get_conn()
     try:
-        cond, params = _filtro_data(inicio, fim)
+        cond, params = _filtro_data(inicio, fim, forma=forma)
         cond_pago = cond + " AND v.cancelada=0"
         linhas = conn.execute(
             f"""SELECT CAST(strftime('%w', v.data_hora) AS INTEGER) dia,
@@ -402,10 +412,10 @@ def vendas_por_dia_semana(inicio=None, fim=None):
         conn.close()
 
 
-def melhor_pior_dia(inicio=None, fim=None):
+def melhor_pior_dia(inicio=None, fim=None, forma=None):
     """Devolve (melhor_dia, pior_dia) por faturamento, ignorando dias sem venda.
     Se não houver nenhuma venda no período, devolve (None, None)."""
-    dias = vendas_por_dia_semana(inicio, fim)
+    dias = vendas_por_dia_semana(inicio, fim, forma=forma)
     validos = [d for d in dias if d['numero_vendas'] > 0]
     if not validos:
         return None, None
@@ -413,11 +423,12 @@ def melhor_pior_dia(inicio=None, fim=None):
             min(validos, key=lambda d: d['faturamento']))
 
 
-def vendas_por_hora(inicio=None, fim=None):
-    """Distribuição de vendas pelas 24 horas do dia, pra achar o horário de pico."""
+def vendas_por_hora(inicio=None, fim=None, forma=None):
+    """Distribuição de vendas pelas 24 horas do dia, pra achar o horário de pico.
+    'forma' restringe a uma forma de pagamento."""
     conn = db.get_conn()
     try:
-        cond, params = _filtro_data(inicio, fim)
+        cond, params = _filtro_data(inicio, fim, forma=forma)
         linhas = conn.execute(
             f"""SELECT CAST(strftime('%H', v.data_hora) AS INTEGER) hora,
                        COUNT(*) n, COALESCE(SUM(v.valor_total), 0) total
@@ -436,11 +447,12 @@ def vendas_por_hora(inicio=None, fim=None):
 # ----------------------------------------------------------------------
 # Produtos, categorias, clientes e pagamento
 # ----------------------------------------------------------------------
-def produtos_mais_vendidos(inicio=None, fim=None, limite=15):
-    """Ranking de produtos por quantidade vendida no período (com receita junto)."""
+def produtos_mais_vendidos(inicio=None, fim=None, limite=15, forma=None):
+    """Ranking de produtos por quantidade vendida no período (com receita junto).
+    'forma' permite ver o que mais vende quando o pagamento foi de um meio só."""
     conn = db.get_conn()
     try:
-        cond, params = _filtro_data(inicio, fim)
+        cond, params = _filtro_data(inicio, fim, forma=forma)
         rows = conn.execute(
             f"""SELECT p.id, p.nome, p.unidade, COALESCE(p.categoria, 'Sem categoria') categoria,
                        SUM(iv.quantidade) qtd, SUM(iv.quantidade * iv.preco_unitario) receita,
@@ -455,13 +467,13 @@ def produtos_mais_vendidos(inicio=None, fim=None, limite=15):
         conn.close()
 
 
-def produtos_por_dia_semana(dia_semana, inicio=None, fim=None, limite=8):
+def produtos_por_dia_semana(dia_semana, inicio=None, fim=None, limite=8, forma=None):
     """Top produtos vendidos especificamente num dia da semana (0=Domingo...6=Sábado).
     É a pergunta central do mercadinho de bairro: o que vende mais numa terça,
-    numa sexta, num domingo."""
+    numa sexta, num domingo. 'forma' restringe a uma forma de pagamento."""
     conn = db.get_conn()
     try:
-        cond, params = _filtro_data(inicio, fim)
+        cond, params = _filtro_data(inicio, fim, forma=forma)
         rows = conn.execute(
             f"""SELECT p.nome, p.unidade, COALESCE(p.categoria, 'Sem categoria') categoria,
                        SUM(iv.quantidade) qtd, SUM(iv.quantidade * iv.preco_unitario) receita
@@ -476,11 +488,12 @@ def produtos_por_dia_semana(dia_semana, inicio=None, fim=None, limite=8):
         conn.close()
 
 
-def vendas_por_categoria(inicio=None, fim=None):
-    """Receita e quantidade por categoria de produto, do maior pro menor."""
+def vendas_por_categoria(inicio=None, fim=None, forma=None):
+    """Receita e quantidade por categoria de produto, do maior pro menor.
+    'forma' restringe a uma forma de pagamento."""
     conn = db.get_conn()
     try:
-        cond, params = _filtro_data(inicio, fim)
+        cond, params = _filtro_data(inicio, fim, forma=forma)
         rows = conn.execute(
             f"""SELECT COALESCE(NULLIF(TRIM(p.categoria), ''), 'Sem categoria') categoria,
                        SUM(iv.quantidade) qtd,
@@ -504,7 +517,9 @@ def vendas_por_categoria(inicio=None, fim=None):
 
 def vendas_por_forma_pagamento(inicio=None, fim=None):
     """Quanto entrou por dinheiro, pix, crédito, débito, voucher e fiado —
-    com a taxa paga em cada forma, quando o banco tiver esse controle."""
+    com a taxa paga em cada forma, quando o banco tiver esse controle.
+    Cada item traz também o rótulo amigável ('Débito' em vez de 'cartao_debito')
+    e a ordem fixa das formas, pra ficar igual em todas as telas."""
     conn = db.get_conn()
     try:
         cond, params = _filtro_data(inicio, fim)
@@ -514,8 +529,17 @@ def vendas_por_forma_pagamento(inicio=None, fim=None):
                        COALESCE(SUM(v.valor_total), 0) total,
                        COALESCE(SUM({taxa}), 0) taxas
                 FROM vendas v WHERE 1=1{cond}
-                GROUP BY v.forma_pagamento ORDER BY total DESC""", params).fetchall()
-        itens = [dict(r) for r in rows]
+                GROUP BY v.forma_pagamento""", params).fetchall()
+        por_forma = {r['forma']: dict(r) for r in rows}
+        itens = []
+        for chave, rotulo in FORMAS_PAGAMENTO_VENDA:
+            d = por_forma.pop(chave, None)
+            if d:
+                d['rotulo'] = rotulo
+                itens.append(d)
+        for chave, d in sorted(por_forma.items(), key=lambda kv: -(kv[1]['total'] or 0)):
+            d['rotulo'] = rotulo_forma_pagamento(chave)
+            itens.append(d)
         total_geral = sum(i['total'] for i in itens) or 1
         for i in itens:
             i['total'] = round(i['total'], 2)
@@ -527,13 +551,14 @@ def vendas_por_forma_pagamento(inicio=None, fim=None):
         conn.close()
 
 
-def top_clientes(inicio=None, fim=None, limite=10):
-    """Ranking de clientes cadastrados por total gasto no período."""
+def top_clientes(inicio=None, fim=None, limite=10, forma=None):
+    """Ranking de clientes cadastrados por total gasto no período.
+    'forma' restringe a uma forma de pagamento."""
     conn = db.get_conn()
     try:
         if not _tem_cliente(conn):
             return []
-        cond, params = _filtro_data(inicio, fim)
+        cond, params = _filtro_data(inicio, fim, forma=forma)
         rows = conn.execute(
             f"""SELECT c.id, c.nome, COUNT(*) n_compras,
                        COALESCE(SUM(v.valor_total), 0) total,
@@ -550,11 +575,11 @@ def top_clientes(inicio=None, fim=None, limite=10):
         conn.close()
 
 
-def curva_abc(inicio=None, fim=None):
+def curva_abc(inicio=None, fim=None, forma=None):
     """Classifica os produtos vendidos no período em A (≈80% da receita),
     B (até ≈95%) e C (o restante) — mostra onde vale concentrar reposição
-    e atenção no dia a dia."""
-    produtos = produtos_mais_vendidos(inicio, fim, limite=100000)
+    e atenção no dia a dia. 'forma' restringe a uma forma de pagamento."""
+    produtos = produtos_mais_vendidos(inicio, fim, limite=100000, forma=forma)
     produtos.sort(key=lambda p: p['receita'], reverse=True)
     total = sum(p['receita'] for p in produtos) or 1
     acumulado = 0.0
@@ -572,14 +597,15 @@ def curva_abc(inicio=None, fim=None):
 # ----------------------------------------------------------------------
 # É isso — e não a data comemorativa em si — que de fato muda o movimento
 # de um mercadinho de bairro no dia a dia.
-def vendas_por_classe_dia(inicio=None, fim=None):
+def vendas_por_classe_dia(inicio=None, fim=None, forma=None):
     """Agrupa todo o histórico de vendas por tipo de dia: Feriado, Véspera
     de feriado, Dia de pagamento, Fim de semana ou Dia normal — em vez de
     por data comemorativa. Mostra também a média por dia de cada classe,
-    porque feriado é raro e a soma sozinha enganaria a comparação."""
+    porque feriado é raro e a soma sozinha enganaria a comparação.
+    'forma' restringe a uma forma de pagamento."""
     conn = db.get_conn()
     try:
-        cond, params = _filtro_data(inicio, fim)
+        cond, params = _filtro_data(inicio, fim, forma=forma)
         rows = conn.execute(
             f"""SELECT date(v.data_hora) dia, COUNT(*) n, COALESCE(SUM(v.valor_total), 0) total
                 FROM vendas v WHERE 1=1{cond} GROUP BY dia""", params).fetchall()

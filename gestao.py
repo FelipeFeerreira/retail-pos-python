@@ -29,6 +29,9 @@ PERMISSOES = {
     'caixa': {'venda'}, 'estoque': {'estoque'},
     'financeiro': {'financeiro', 'credito'},
 }
+# Política básica de fiado: R$ 200 de limite, 15 dias de prazo e 1% de
+# juros/multa por dia de atraso. É o padrão para clientes sem política própria.
+POLITICA_PADRAO = {'limite_credito': 200, 'prazo_dias': 15, 'juros_dia': 1, 'multa_dia': 1}
 
 
 def permitir(acao):
@@ -142,7 +145,7 @@ def migrar(conn):
     ''')
     conn.execute("INSERT OR IGNORE INTO contas_financeiras(id,nome,tipo) VALUES(1,'Caixa da loja','dinheiro')")
     conn.execute("INSERT OR IGNORE INTO contas_financeiras(id,nome,tipo) VALUES(2,'Banco / PIX','banco')")
-    conn.execute("INSERT OR IGNORE INTO gestao_config(chave,valor) VALUES('politica_fiado',?)", (json.dumps({'limite_credito':200,'prazo_dias':None,'juros_dia':0,'multa_dia':0}),))
+    conn.execute("INSERT OR IGNORE INTO gestao_config(chave,valor) VALUES('politica_fiado',?)", (json.dumps(POLITICA_PADRAO),))
     if not conn.execute("SELECT 1 FROM gestao_config WHERE chave='migracao_v1'").fetchone():
         # Sem vencimentos inventados e sem reclassificar ajustes antigos como dinheiro.
         for cli in conn.execute('SELECT id FROM clientes').fetchall():
@@ -155,6 +158,19 @@ def migrar(conn):
                              (v['id'], cli['id'], total, recebido))
         conn.execute("INSERT INTO gestao_config(chave,valor) VALUES('migracao_v1',?)", (datetime.now().isoformat(timespec='seconds'),))
         auditar(conn, 'migracao', 'sistema', detalhes={'caixa_historico': 'não inferido', 'custos_antigos': 'não inferidos'})
+    if not conn.execute("SELECT 1 FROM gestao_config WHERE chave='politica_padrao_v2'").fetchone():
+        # Uma única vez: fixa a política padrão (200/15/1/1) e completa os
+        # clientes sem política configurada com esses valores, sem mexer em
+        # quem já tinha limite/prazo/juros próprios definidos.
+        conn.execute("INSERT OR REPLACE INTO gestao_config(chave,valor) VALUES('politica_fiado',?)", (json.dumps(POLITICA_PADRAO),))
+        conn.execute(
+            "UPDATE clientes SET limite_credito=COALESCE(limite_credito,?), "
+            "prazo_dias=COALESCE(prazo_dias,?), juros_dia=COALESCE(juros_dia,?), "
+            "multa_dia=COALESCE(multa_dia,?) WHERE ativo=1",
+            (POLITICA_PADRAO['limite_credito'], POLITICA_PADRAO['prazo_dias'],
+             POLITICA_PADRAO['juros_dia'], POLITICA_PADRAO['multa_dia']))
+        conn.execute("INSERT INTO gestao_config(chave,valor) VALUES('politica_padrao_v2',?)", (datetime.now().isoformat(timespec='seconds'),))
+        auditar(conn, 'migracao', 'sistema', detalhes={'politica_padrao_v2': POLITICA_PADRAO})
 
 
 def config(chave, padrao=None, conn=None):

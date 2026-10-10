@@ -5220,36 +5220,95 @@ class App(GestaoMixin, tk.Tk):
             return f'Balança {self.balanca.porta} · conectada · {agora} · F1 = Atalhos'
         return f'SQLite · {agora} · F1 = Atalhos'
 
+    def _atalho_global(self, func):
+        """Embrulha um atalho de teclado que vale para o sistema inteiro.
+        Ignora a tecla quando há um diálogo modal aberto (grab), pra não
+        disparar a ação 'atrás' da janela que o usuário está usando, e
+        devolve 'break' pra tecla não vazar pro widget com foco."""
+        def handler(event=None):
+            if self.grab_current() is not None:
+                return None
+            func()
+            return 'break'
+        return handler
+
+    def _proxima_aba(self, passo=1):
+        abas = self.nb.tabs()
+        if not abas:
+            return
+        atual = self.nb.index(self.nb.select())
+        self.nb.select(abas[(atual + passo) % len(abas)])
+
+    def _atalho_aba(self, passo):
+        """Ctrl+Tab / Ctrl+Shift+Tab. O próprio ttk.Notebook já troca de aba
+        quando ele está com o foco; aqui só agimos quando o foco está em outro
+        widget (ex.: o campo de busca), pra não avançar duas abas."""
+        def handler(event=None):
+            if self.grab_current() is not None:
+                return None
+            if self.focus_get() is self.nb:
+                return None
+            self._proxima_aba(passo)
+            return 'break'
+        return handler
+
+    def _nova_venda_atalho(self):
+        self.nb.select(self.tab_caixa)
+        self.entrada.focus_set()
+        self.entrada.selection_range(0, 'end')
+
     def _atalhos(self):
-        """Atalhos de teclado no estilo dos caixas de mercados grandes.
-        As teclas F e Ctrl+tecla não digitam caracteres, então funcionam mesmo com o
-        foco no campo de busca/código de barras, sem atrapalhar a leitura do bipador.
-        F11 (tela cheia total) e Esc (sair da tela cheia) já existiam neste sistema e
-        continuam funcionando do mesmo jeito."""
-        self.bind_all('<F1>', lambda e: self._ajuda_atalhos())
-        self.bind_all('<F2>', lambda e: self._ir_para_busca())
-        self.bind_all('<F3>', lambda e: self._selecionar_cliente())
-        self.bind_all('<F4>', lambda e: self._focar_recebido())
-        self.bind_all('<F5>', lambda e: self._definir_pagamento('dinheiro'))
-        self.bind_all('<F6>', lambda e: self._definir_pagamento('cartao_credito'))
-        self.bind_all('<F7>', lambda e: self._definir_pagamento('cartao_debito'))
-        self.bind_all('<F8>', lambda e: self._definir_pagamento('pix'))
-        self.bind_all('<F9>', lambda e: self._definir_pagamento('voucher'))
-        self.bind_all('<F10>', lambda e: self._ativar_fiado_atalho())
-        self.bind_all('<F12>', lambda e: self._abrir_finalizar())
-        self.bind_all('<Control-p>', lambda e: self._imprimir_ultimo())
-        self.bind_all('<Control-P>', lambda e: self._imprimir_ultimo())
-        self.bind_all('<Control-Delete>', lambda e: self._cancelar_venda_atalho())
-        self.bind_all('<Control-Key-1>', lambda e: self.nb.select(self.tab_caixa))
-        self.bind_all('<Control-Key-2>', lambda e: self.nb.select(self.tab_prod))
-        self.bind_all('<Control-Key-3>', lambda e: self.nb.select(self.tab_cli))
-        self.bind_all('<Control-Key-4>', lambda e: self.nb.select(self.tab_consumo))
-        self.bind_all('<Control-Key-5>', lambda e: self.nb.select(self.tab_perdas))
-        self.bind_all('<Control-Key-6>', lambda e: self.nb.select(self.tab_producao))
-        self.bind_all('<Control-Key-7>', lambda e: self.nb.select(self.tab_pain))
-        self.bind_all('<Control-Key-8>', lambda e: self.nb.select(self.tab_analises))
-        self.bind_all('<Control-Key-9>', lambda e: self.nb.select(self.tab_estoque))
-        self.bind_all('<Control-Key-0>', lambda e: self.nb.select(self.tab_config))
+        """Atalhos de teclado globais do sistema (estilo caixa de mercado).
+        As teclas F e Ctrl+tecla não digitam caracteres, então funcionam mesmo
+        com o foco no campo de busca/código de barras, sem atrapalhar o bipador.
+        Nenhum atalho de texto (Ctrl+C/V/X/A) é sobrescrito."""
+        at = self._atalho_global
+
+        # Ajuda e operação do caixa
+        self.bind_all('<F1>', at(self._ajuda_atalhos))
+        self.bind_all('<F2>', at(self._ir_para_busca))
+        self.bind_all('<F3>', at(self._selecionar_cliente))
+        self.bind_all('<F4>', at(self._focar_recebido))
+        self.bind_all('<F5>', at(lambda: self._definir_pagamento('dinheiro')))
+        self.bind_all('<F6>', at(lambda: self._definir_pagamento('cartao_credito')))
+        self.bind_all('<F7>', at(lambda: self._definir_pagamento('cartao_debito')))
+        self.bind_all('<F8>', at(lambda: self._definir_pagamento('pix')))
+        self.bind_all('<F9>', at(lambda: self._definir_pagamento('voucher')))
+        self.bind_all('<F10>', at(self._ativar_fiado_atalho))
+        self.bind_all('<F12>', at(self._abrir_finalizar))
+
+        # Ações rápidas disponíveis em qualquer tela
+        for seq in ('<Control-p>', '<Control-P>'):
+            self.bind_all(seq, at(self._imprimir_ultimo))
+        for seq in ('<Control-r>', '<Control-R>'):
+            self.bind_all(seq, at(self._atualizar_aba_selecionada))
+        for seq in ('<Control-n>', '<Control-N>'):
+            self.bind_all(seq, at(self._nova_venda_atalho))
+        for seq in ('<Control-b>', '<Control-B>'):
+            self.bind_all(seq, at(self._backup_manual))
+        for seq in ('<Control-e>', '<Control-E>'):
+            self.bind_all(seq, at(self._exportar_relatorio))
+        for seq in ('<Control-k>', '<Control-K>'):
+            self.bind_all(seq, at(self._gerar_catalogo))
+        for seq in ('<Control-w>', '<Control-W>'):
+            self.bind_all(seq, at(self._abrir_visor_cliente))
+        self.bind_all('<Control-Delete>', at(self._cancelar_venda_atalho))
+
+        # Navegação entre abas: ciclo e acesso direto (na ordem do sistema)
+        self.bind_all('<Control-Tab>', self._atalho_aba(1))
+        self.bind_all('<Control-ISO_Left_Tab>', self._atalho_aba(-1))
+        self.bind_all('<Control-Shift-Key-Tab>', self._atalho_aba(-1))
+        self.bind_all('<Control-Next>', at(lambda: self._proxima_aba(1)))
+        self.bind_all('<Control-Prior>', at(lambda: self._proxima_aba(-1)))
+        abas_numeradas = (self.tab_caixa, self.tab_prod, self.tab_cli, self.tab_consumo,
+                          self.tab_perdas, self.tab_producao, self.tab_pain, self.tab_analises,
+                          self.tab_hist, self.tab_estoque)
+        for i, tab in enumerate(abas_numeradas, start=1):
+            self.bind_all(f'<Control-Key-{i % 10}>', at(lambda t=tab: self.nb.select(t)))
+        self.bind_all('<Control-Key-minus>', at(lambda: self.nb.select(self.tab_config)))
+        self.bind_all('<Control-f>', at(lambda: self.nb.select(getattr(self, 'tab_fin', self.tab_config))))
+        self.bind_all('<Control-g>', at(lambda: self.nb.select(getattr(self, 'tab_gestao', self.tab_config))))
+
         # Estes ficam só no carrinho da venda atual, pra não atrapalhar quando a
         # pessoa está digitando/apagando texto em outro campo.
         self.tree_car.bind('<Delete>', lambda e: self._remover())
@@ -5292,13 +5351,15 @@ class App(GestaoMixin, tk.Tk):
     def _ajuda_atalhos(self):
         dlg = tk.Toplevel(self)
         dlg.title('Atalhos do teclado')
-        dlg.geometry('500x600')
+        dlg.geometry('580x640')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
         _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
-        tk.Label(dlg, text='Atalhos do teclado', bg=COR['branco'], fg=COR['verde2'], font=(FONTE, 15, 'bold')).pack(anchor='w', padx=24, pady=(16, 10))
+        tk.Label(dlg, text='Atalhos do teclado', bg=COR['branco'], fg=COR['verde2'], font=(FONTE, 15, 'bold')).pack(anchor='w', padx=24, pady=(16, 2))
+        tk.Label(dlg, text='Funcionam em qualquer tela — são ignorados quando um diálogo está aberto.',
+                 bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 9)).pack(anchor='w', padx=24, pady=(0, 10))
         atalhos = [
             ('F1', 'Mostrar esta ajuda'),
             ('F2', 'Ir para a busca de produto (caixa)'),
@@ -5313,21 +5374,43 @@ class App(GestaoMixin, tk.Tk):
             ('F11', 'Tela cheia total'),
             ('F12', 'Finalizar venda'),
             ('Ctrl+P', 'Reimprimir último cupom'),
+            ('Ctrl+N', 'Nova venda (volta ao caixa)'),
+            ('Ctrl+R', 'Atualizar a tela atual'),
+            ('Ctrl+B', 'Fazer backup agora'),
+            ('Ctrl+E', 'Exportar relatório de análises (.xlsx)'),
+            ('Ctrl+K', 'Gerar catálogo de produtos (.xlsx)'),
+            ('Ctrl+W', 'Abrir a tela do cliente (visor)'),
             ('Ctrl+Delete', 'Cancelar venda atual (limpa o carrinho)'),
-            ('Ctrl + 1 a 9', 'Trocar de aba: Caixa, Produtos, Clientes, Consumo interno, Perdas, Produção, Painel, Análises, Estoque/Validades'),
-            ('Ctrl + 0', 'Abrir Configurações'),
+            ('Ctrl+Tab', 'Ir para a próxima aba'),
+            ('Ctrl+Shift+Tab', 'Voltar para a aba anterior'),
+            ('Ctrl + 1 a 9', 'Abrir as abas 1 a 9: Caixa, Produtos, Clientes, Consumo interno, Perdas, Produção, Painel, Análises, Histórico'),
+            ('Ctrl + 0', 'Abrir Estoque / Validades'),
+            ('Ctrl + −', 'Abrir Configurações'),
+            ('Ctrl+F', 'Abrir Financeiro'),
+            ('Ctrl+G', 'Abrir Gestão'),
             ('Delete', 'Remover item selecionado no carrinho da venda'),
             ('+  /  −', 'Aumentar / diminuir quantidade do item selecionado no carrinho'),
             ('Esc', 'Fechar a janela aberta (ou sair da tela cheia total)'),
         ]
-        corpo = tk.Frame(dlg, bg=COR['branco'])
-        corpo.pack(fill='both', expand=True, padx=24, pady=(0, 10))
+        wrap = tk.Frame(dlg, bg=COR['branco'])
+        wrap.pack(fill='both', expand=True, padx=24, pady=(0, 10))
+        canvas = tk.Canvas(wrap, bg=COR['branco'], highlightthickness=0)
+        scroll = ttk.Scrollbar(wrap, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side='left', fill='both', expand=True)
+        scroll.pack(side='right', fill='y')
+        corpo = tk.Frame(canvas, bg=COR['branco'])
+        janela = canvas.create_window((0, 0), window=corpo, anchor='nw')
+        corpo.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+        canvas.bind('<Configure>', lambda e: canvas.itemconfig(janela, width=e.width))
+        canvas.bind('<Enter>', lambda e: canvas.bind_all('<MouseWheel>', lambda ev: canvas.yview_scroll(int(-1 * (ev.delta / 120)), 'units')))
+        canvas.bind('<Leave>', lambda e: canvas.unbind_all('<MouseWheel>'))
         for i, (tecla, desc) in enumerate(atalhos):
             cor_fundo = COR['zebra'] if i % 2 else COR['branco']
             linha = tk.Frame(corpo, bg=cor_fundo)
             linha.pack(fill='x')
             tk.Label(linha, text=tecla, bg=cor_fundo, fg=COR['verde2'], font=('Consolas', 10, 'bold'), width=15, anchor='w').pack(side='left', padx=(4, 8), pady=6)
-            tk.Label(linha, text=desc, bg=cor_fundo, fg=COR['cinza'], font=(FONTE, 10), anchor='w', justify='left', wraplength=300).pack(side='left', fill='x', expand=True, pady=6)
+            tk.Label(linha, text=desc, bg=cor_fundo, fg=COR['cinza'], font=(FONTE, 10), anchor='w', justify='left', wraplength=360).pack(side='left', fill='x', expand=True, pady=6)
         ttk.Button(dlg, text='Fechar', style='Primary.TButton', command=dlg.destroy).pack(fill='x', padx=24, pady=(0, 20))
 
     def _relogio(self):

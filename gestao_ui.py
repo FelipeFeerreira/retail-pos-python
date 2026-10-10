@@ -564,7 +564,7 @@ class GestaoMixin:
         grupos=[('Estoque e produção',[
             ('Catálogo, filtros e ações em lote',self._catalogo_gestao),('Conferir duplicatas',self._duplicatas_ui),('Compra com vários produtos',self._compra_varios_ui),('Inventário físico',self._inventario_ui),('Movimentações de estoque',lambda:self._listar_registros('Movimentações',g.consultar('SELECT m.*,p.nome FROM movimentacoes_estoque m JOIN produtos p ON p.id=m.produto_id ORDER BY m.id DESC LIMIT 2000'))),('Perdas e consumo por mês / categoria',self._relatorio_operacional),('Giro e sugestão de reposição',self._reposicao_ui),('Registrar consumo recorrente',self._consumo_recorrente_ui)]),
                 ('Financeiro', [('Política padrão do fiado',lambda:self._politica_ui()),('Conciliação bancária CSV',self._conciliacao_ui),('Orçamento mensal',self._orcamento_ui),('Cancelar venda / devolver total',self._cancelar_venda_ui),('Venda com pagamento dividido',self._venda_dividida_ui)]),
-                ('Segurança e preferências',[('Cadastrar usuário e perfil',self._novo_usuario_ui),('Trocar usuário',self._login_gestao),('Auditoria',self._auditoria_ui),('Backup completo agora',self._backup_completo_ui),('Verificar / restaurar backup',self._restaurar_backup_ui),('Tamanho de fonte',self._fonte_ui)])]
+                ('Segurança e preferências',[('Cadastrar usuário e perfil',self._novo_usuario_ui),('Trocar usuário',self._login_gestao),('Sair (bloquear)',self._sair_usuario),('Auditoria',self._auditoria_ui),('Backup completo agora',self._backup_completo_ui),('Verificar / restaurar backup',self._restaurar_backup_ui),('Tamanho de fonte',self._fonte_ui)])]
         for nome,acoes in grupos:
             f=ttk.Frame(self.ferramentas,padding=15); self.ferramentas.add(f,text=nome)
             for titulo,func in acoes:
@@ -793,13 +793,13 @@ class GestaoMixin:
         users=g.consultar('SELECT nome FROM usuarios WHERE ativo=1 ORDER BY nome')
         if not users:
             def criar(v):
-                g.criar_usuario(v['nome'],v['senha'],'gerente'); g.autenticar(v['nome'],v['senha']); self.identidade.config(text=f'{g.USUARIO} • {g.PERFIL}')
+                g.criar_usuario(v['nome'],v['senha'],'gerente'); g.autenticar(v['nome'],v['senha']); self._atualizar_identidade()
             dlg=self._formulario('Primeiro acesso — gerente',[('nome','Nome de acesso','',None),('senha','Senha (mínimo 8 caracteres)','',None)],criar,
                                  'Cadastre o gerente para identificar operações e configurar perfis. Não há senha padrão.')
         else:
             def entrar(v):
                 if not g.autenticar(v['nome'],v['senha']): raise g.ErroGestao('Usuário ou senha inválidos.')
-                self.identidade.config(text=f'{g.USUARIO} • {g.PERFIL}')
+                self._atualizar_identidade()
             dlg=self._formulario('Entrar no sistema',[('nome','Usuário',users[0]['nome'],[r['nome'] for r in users]),('senha','Senha','',None)],entrar)
         # Fechar o diálogo inicial não libera acesso anônimo.
         if not getattr(self,'_autenticado',False):
@@ -811,6 +811,17 @@ class GestaoMixin:
         def verificar(_=None):
             if g.USUARIO!='Sistema local': self._autenticado=True
         dlg.bind('<Destroy>',verificar,add='+')
+
+    def _sair_usuario(self):
+        """Encerra a sessão e volta à tela de login, sem permissões ativas."""
+        if not self._senha_configurada():
+            return
+        if not messagebox.askyesno('Sair', 'Encerrar a sessão atual e bloquear o sistema?'):
+            return
+        g.sair()
+        self._atualizar_identidade()
+        self._toast('Sessão encerrada.')
+        self._login_gestao()
 
     def _auditoria_ui(self):
         g.permitir('configurar'); self._listar_registros('Auditoria de operações',g.consultar('SELECT * FROM auditoria ORDER BY id DESC LIMIT 2000'))
@@ -824,18 +835,17 @@ class GestaoMixin:
         g.permitir('configurar')
         caminho=filedialog.askopenfilename(filetypes=[('Banco SQLite','*.db')],parent=self)
         if not caminho: return
-        c=sqlite3.connect(f'file:{Path(caminho).as_posix()}?mode=ro',uri=True)
+        from backup import validar_banco, restaurar_backup
         try:
-            if c.execute('PRAGMA integrity_check').fetchone()[0]!='ok': raise g.ErroGestao('Backup inválido.')
-            if not c.execute("SELECT 1 FROM sqlite_master WHERE name='produtos'").fetchone(): raise g.ErroGestao('Arquivo não é um banco deste sistema.')
-        finally: c.close()
+            validar_banco(caminho)
+        except Exception as exc:
+            messagebox.showerror('Backup inválido', str(exc), parent=self); return
         if not messagebox.askyesno('Restaurar banco', 'Backup validado. Restaurar substituirá o banco atual e encerrará o aplicativo. Uma cópia do estado atual será guardada. Confirmar?'): return
-        from backup import backup_completo
-        backup_completo()
-        origem=sqlite3.connect(caminho); destino=sqlite3.connect(db.DB_PATH)
-        try: origem.backup(destino)
-        finally: origem.close(); destino.close()
-        messagebox.showinfo('Restaurado','Abra novamente o aplicativo.'); self.destroy()
+        try:
+            seguranca=restaurar_backup(caminho)
+        except Exception as exc:
+            messagebox.showerror('Falha ao restaurar', str(exc), parent=self); return
+        messagebox.showinfo('Restaurado', f'Banco restaurado.\nCópia do estado anterior em:\n{seguranca}\n\nAbra novamente o aplicativo.'); self.destroy()
 
     def _fonte_ui(self):
         import tkinter.font as tkfont

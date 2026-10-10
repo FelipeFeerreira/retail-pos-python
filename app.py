@@ -4457,11 +4457,40 @@ class App(GestaoMixin, tk.Tk):
         tk.Label(dlg, text='Conferir a entrada pela nota fiscal', bg=COR['branco'], fg=COR['verde2'],
                  font=(FONTE, 15, 'bold')).pack(anchor='w', padx=24, pady=(16, 4))
         forn = ', '.join(plano['fornecedores'][:3]) + ('...' if len(plano['fornecedores']) > 3 else '')
-        tk.Label(dlg, text=f"{plano['total_notas']} nota(s) · {plano['total_itens']} item(ns) · "
-                           f"custo total {self._moeda(plano['total_custo'])} — nada foi gravado ainda",
+        dup = plano['total_notas'] - plano.get('notas_novas', plano['total_notas'])
+        tk.Label(dlg, text=f"{plano.get('notas_novas', plano['total_notas'])} nota(s) nova(s) · "
+                           f"{plano.get('itens_novos', plano['total_itens'])} item(ns) · "
+                           f"custo total {self._moeda(plano['total_custo'])} — nada foi gravado ainda"
+                           + (f"  ·  {dup} nota(s) já importada(s) serão ignoradas" if dup else ''),
                  bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 9)).pack(anchor='w', padx=24)
         tk.Label(dlg, text=f"Fornecedor(es): {forn}", bg=COR['branco'], fg=COR['cinza'],
-                 font=(FONTE, 9)).pack(anchor='w', padx=24, pady=(0, 8))
+                 font=(FONTE, 9)).pack(anchor='w', padx=24, pady=(0, 6))
+
+        # Dados que a nota não traz precisam ser confirmados aqui (nunca inventados).
+        ent_venc = ent_validade = None
+        var_forma = tk.StringVar(value='A prazo')
+        if plano.get('precisa_vencimento') or plano.get('precisa_forma') or plano.get('tem_perecivel'):
+            confirmar_dados = tk.Frame(dlg, bg=COR['amareloclaro'])
+            confirmar_dados.pack(fill='x', padx=24, pady=(0, 8))
+            tk.Label(confirmar_dados, text='⚠ Confirme os dados que a nota não informa (obrigatório):',
+                     bg=COR['amareloclaro'], fg=COR['ambar'], font=(FONTE, 9, 'bold')).pack(anchor='w', padx=12, pady=(8, 2))
+            linha_dados = tk.Frame(confirmar_dados, bg=COR['amareloclaro'])
+            linha_dados.pack(fill='x', padx=12, pady=(0, 8))
+            if plano.get('precisa_vencimento'):
+                tk.Label(linha_dados, text='Vencimento (AAAA-MM-DD):', bg=COR['amareloclaro'],
+                         fg=COR['cinza'], font=(FONTE, 8, 'bold')).pack(side='left')
+                ent_venc = tk.Entry(linha_dados, width=12, font=(FONTE, 10))
+                ent_venc.pack(side='left', padx=(4, 16))
+            if plano.get('precisa_forma'):
+                tk.Label(linha_dados, text='Condição:', bg=COR['amareloclaro'],
+                         fg=COR['cinza'], font=(FONTE, 8, 'bold')).pack(side='left')
+                ttk.Combobox(linha_dados, textvariable=var_forma, state='readonly', width=10,
+                             values=['A prazo', 'À vista']).pack(side='left', padx=(4, 16))
+            if plano.get('tem_perecivel'):
+                tk.Label(linha_dados, text='Validade dos perecíveis (AAAA-MM-DD):', bg=COR['amareloclaro'],
+                         fg=COR['cinza'], font=(FONTE, 8, 'bold')).pack(side='left')
+                ent_validade = tk.Entry(linha_dados, width=12, font=(FONTE, 10))
+                ent_validade.pack(side='left', padx=(4, 16))
 
         tv = ttk.Treeview(dlg, columns=('nota', 'produto', 'qtd', 'un', 'custo', 'venda', 'acao', 'avisos'),
                           show='headings', height=15)
@@ -4499,8 +4528,25 @@ class App(GestaoMixin, tk.Tk):
                        selectcolor=COR['branco'], font=(FONTE, 9)).pack(anchor='w', padx=24)
 
         def confirmar():
+            venc = ent_venc.get().strip() if ent_venc else None
+            validade = ent_validade.get().strip() if ent_validade else None
+            if plano.get('precisa_vencimento') and not venc:
+                messagebox.showerror('Dados da nota', 'Informe o vencimento das notas que não trazem duplicata.', parent=dlg)
+                return
+            if plano.get('tem_perecivel') and not validade:
+                messagebox.showerror('Dados da nota', 'Informe a validade dos itens perecíveis.', parent=dlg)
+                return
+            for rotulo, valor in (('vencimento', venc), ('validade', validade)):
+                if valor:
+                    try:
+                        date.fromisoformat(valor)
+                    except ValueError:
+                        messagebox.showerror('Data inválida', f'{rotulo.capitalize()} deve estar em AAAA-MM-DD.', parent=dlg)
+                        return
             try:
-                resultado = nfe.aplicar(caminhos, plano, aplicar_preco.get())
+                resultado = nfe.aplicar(caminhos, plano, aplicar_preco.get(),
+                                        vencimento_padrao=venc, forma_padrao=var_forma.get(),
+                                        validade_padrao=validade)
             except Exception as exc:
                 messagebox.showerror('Erro ao importar a nota', str(exc), parent=dlg)
                 return
@@ -5496,105 +5542,50 @@ class App(GestaoMixin, tk.Tk):
         self.status.config(text=texto)
         self.after(5000, lambda: self.status.config(text=self._texto_status()))
 
-    @staticmethod
-    def _hash_senha(senha, salt):
-        return hashlib.sha256((salt + senha).encode('utf-8')).hexdigest()
-
     def _senha_configurada(self):
-        conf = carregar_config()
-        return bool(conf.get('senha_hash') and conf.get('senha_salt'))
+        """True quando há um usuário autenticado (fonte única: banco)."""
+        return g.USUARIO != 'Sistema local'
 
-    def _verificar_senha(self, senha):
-        conf = carregar_config()
-        if not conf.get('senha_hash'):
-            return True
-        return self._hash_senha(senha, conf.get('senha_salt', '')) == conf.get('senha_hash')
-
-    def _verificar_login_inicial(self):
-        if not self._senha_configurada():
-            return
-        tries = 0
-        while True:
-            dlg = tk.Toplevel(self)
-            dlg.title(T('titulo_login'))
-            dlg.geometry('380x230')
-            dlg.configure(bg=COR['branco'])
-            dlg.resizable(False, False)
-            dlg.transient(self)
-            _grab_set_safe(dlg)
-            dlg.bind('<Escape>', lambda e: (dlg.destroy(), self._fechar()))
-            tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
-            tk.Label(dlg, text=T('administrador'), bg=COR['branco'], fg=COR['verde2'],
-                     font=(FONTE, 15, 'bold')).pack(anchor='w', padx=22, pady=(14, 2))
-            tk.Label(dlg, text=T('login'), bg=COR['branco'], fg=COR['cinza'],
-                     font=(FONTE, 9)).pack(anchor='w', padx=22)
-            tk.Label(dlg, text=T('senha'), bg=COR['branco'], fg=COR['cinza'],
-                     font=(FONTE, 8, 'bold')).pack(anchor='w', padx=22, pady=(14, 3))
-            ent = tk.Entry(dlg, show='*', font=(FONTE, 13), relief='solid', bd=1, bg=COR['branco'])
-            ent.pack(fill='x', padx=22, ipady=5)
-            ent.focus_set()
-            erro = tk.Label(dlg, text='', bg=COR['branco'], fg=COR['vermelho'], font=(FONTE, 9))
-            erro.pack(anchor='w', padx=22, pady=(6, 0))
-
-            def _validar(event=None):
-                if self._verificar_senha(ent.get()):
-                    dlg.destroy()
-                    dlg.resultado = True
-                else:
-                    erro.config(text=T('senha_incorreta'))
-
-            ent.bind('<Return>', _validar)
-            botoes = tk.Frame(dlg, bg=COR['branco'])
-            botoes.pack(fill='x', padx=22, pady=(10, 16), side='bottom')
-            ttk.Button(botoes, text=T('entrar'), style='Primary.TButton', command=_validar).pack(side='right')
-            ttk.Button(botoes, text=T('cancelar'), style='Secondary.TButton', command=lambda: (dlg.destroy(), self._fechar())).pack(side='right', padx=(0, 8))
-            tk.Label(dlg, text=T('senha_dica'), bg=COR['branco'], fg=COR['cinza'],
-                     font=(FONTE, 7), wraplength=330, justify='left').pack(anchor='w', padx=22)
-            self.wait_window(dlg)
-            if getattr(dlg, 'resultado', False):
-                return
-            tries += 1
-            if tries >= 3:
-                messagebox.showerror(T('titulo_login'), T('senha_incorreta_encerrar'), parent=self)
-                self._fechar()
-                return
+    def _atualizar_identidade(self):
+        if hasattr(self, 'identidade'):
+            self.identidade.config(
+                text=f'{g.USUARIO} • {g.PERFIL}' if g.PERFIL else 'Não autenticado')
 
     def _definir_senha(self, alterar=False):
+        # A autenticação é única e vive no banco de dados (tabela usuarios).
+        # Aqui só trocamos a senha do usuário logado; se ninguém estiver
+        # logado, pedimos para entrar antes.
+        if not self._senha_configurada():
+            messagebox.showinfo('Segurança', 'Entre com um usuário para alterar a senha.')
+            self._login_gestao()
+            return
         dlg = tk.Toplevel(self)
-        dlg.title(T('alterar_senha') if alterar else T('definir_senha'))
-        dlg.geometry('400x300' if alterar else '400x260')
+        dlg.title(T('alterar_senha'))
+        dlg.geometry('400x300')
         dlg.configure(bg=COR['branco'])
         dlg.transient(self)
         _grab_set_safe(dlg)
         dlg.bind('<Escape>', lambda e: dlg.destroy())
         tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
-        tk.Label(dlg, text=T('alterar_senha') if alterar else T('definir_senha'),
-                 bg=COR['branco'], fg=COR['verde2'], font=(FONTE, 14, 'bold')).pack(anchor='w', padx=22, pady=(14, 10))
+        tk.Label(dlg, text=T('alterar_senha'), bg=COR['branco'], fg=COR['verde2'],
+                 font=(FONTE, 14, 'bold')).pack(anchor='w', padx=22, pady=(14, 4))
+        tk.Label(dlg, text=f"Usuário: {g.USUARIO}", bg=COR['branco'], fg=COR['cinza'],
+                 font=(FONTE, 9)).pack(anchor='w', padx=22, pady=(0, 6))
 
-        campos = []
-        if alterar:
-            campos.append(((T('senha_atual'),)))
-        campos.append((T('nova_senha'),))
-        campos.append((T('confirmar_senha'),))
         entradas = {}
-        for rotulo in campos:
-            r = tuple(rotulo) if isinstance(rotulo, tuple) else (rotulo,)
-            tk.Label(dlg, text=r[0], bg=COR['branco'], fg=COR['cinza'],
+        for rotulo in (T('senha_atual'), T('nova_senha'), T('confirmar_senha')):
+            tk.Label(dlg, text=rotulo, bg=COR['branco'], fg=COR['cinza'],
                      font=(FONTE, 8, 'bold')).pack(anchor='w', padx=22, pady=(10, 3))
             ent = tk.Entry(dlg, show='*', font=(FONTE, 11), relief='solid', bd=1, bg=COR['branco'])
             ent.pack(fill='x', padx=22, ipady=4)
             ent.focus_set()
-            entradas[r[0]] = ent
+            entradas[rotulo] = ent
 
         erro = tk.Label(dlg, text='', bg=COR['branco'], fg=COR['vermelho'], font=(FONTE, 9))
         erro.pack(anchor='w', padx=22, pady=(6, 0))
 
         def _salvar():
-            if alterar:
-                atual = entradas[T('senha_atual')].get()
-                if not self._verificar_senha(atual):
-                    erro.config(text=T('senha_atual_errada'))
-                    return
+            atual = entradas[T('senha_atual')].get()
             nova = entradas[T('nova_senha')].get()
             confirma = entradas[T('confirmar_senha')].get()
             if not nova:
@@ -5603,8 +5594,11 @@ class App(GestaoMixin, tk.Tk):
             if nova != confirma:
                 erro.config(text=T('senha_divergente'))
                 return
-            salt = hashlib.sha256(str(datetime.now().timestamp()).encode()).hexdigest()[:16]
-            salvar_config({'senha_salt': salt, 'senha_hash': self._hash_senha(nova, salt)})
+            try:
+                g.alterar_senha(g.USUARIO, nova, atual)
+            except g.ErroGestao as exc:
+                erro.config(text=str(exc))
+                return
             dlg.destroy()
             self._toast(T('senha_salva'))
 
@@ -5711,30 +5705,43 @@ class App(GestaoMixin, tk.Tk):
         self.destroy()
 
 
-def _bloquear_instancia_unica():
-    """Garante que so exista uma copia do sistema aberta.
-
-    Duas instancias acessando o mesmo SQLite fazem as operacoes travarem
-    (espera de lock). Se ja houver uma aberta, avisa e encerra esta.
-    """
-    import fcntl
+def _avisar_instancia_aberta():
+    """Avisa (multiplataforma) que o sistema já está aberto em outra janela."""
     import subprocess
-    import sys
-    import tempfile
-    caminho = os.path.join(tempfile.gettempdir(), 'mercadinho.lock')
-    arq = open(caminho, 'w')
+    mensagem = 'O Sistema do Mercadinho já está aberto.'
     try:
-        fcntl.flock(arq, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+        if os.name == 'nt':
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, mensagem, 'Mercadinho', 0x40)
+            return
+        subprocess.Popen(['notify-send', '-a', 'Mercadinho', mensagem])
+    except Exception:
         try:
-            subprocess.Popen(['notify-send', '-a', 'Mercadinho',
-                              'O Sistema do Mercadinho ja esta aberto.'])
+            print(mensagem)
         except Exception:
             pass
+
+
+def _bloquear_instancia_unica():
+    """Garante que só exista uma cópia do sistema aberta (Windows e Linux).
+
+    Duas instâncias acessando o mesmo SQLite fazem as operações travarem
+    (espera de lock). Se já houver uma aberta, avisa e encerra esta.
+    """
+    import sys
+    from applock import TravaInstancia, InstanciaJaAberta
+    trava = TravaInstancia('mercadinho')
+    try:
+        trava.adquirir()
+    except InstanciaJaAberta:
+        _avisar_instancia_aberta()
         sys.exit(0)
-    return arq
+    return trava
 
 
 if __name__ == '__main__':
     _trava_instancia = _bloquear_instancia_unica()
-    App().mainloop()
+    try:
+        App().mainloop()
+    finally:
+        _trava_instancia.liberar()

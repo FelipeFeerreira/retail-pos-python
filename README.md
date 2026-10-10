@@ -13,21 +13,47 @@ A desktop retail-management application built with **Python, Tkinter and SQLite*
 
 ## Run locally
 
-Use Windows and Python 3.13 with Tkinter support. The requirements include Windows-specific printer integration.
+Requires Python 3.13 with Tkinter support. `pywin32` (Windows printer integration) is marked Windows-only in `requirements.txt`, so the same file installs cleanly on Linux/macOS too.
+
+### Windows
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\python.exe app.py
+# or just double-click / run:
+Mercadinho.bat
 ```
 
-The application initializes its SQLite database on first run. Create a manager account and configure store preferences locally. This repository intentionally contains no live database, store configuration, customer records or backups.
+### Linux / macOS
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python app.py
+# or just run the launcher (it finds the project folder and the venv itself):
+./Mercadinho.sh
+```
+
+The application initializes its SQLite database on first run. On the first launch you register the manager account (there is no default password); after that, every protected operation requires an authenticated user. This repository intentionally contains no live database, store configuration, customer records or backups.
+
+## Security and data safety
+
+- **Authentication:** profiles live in the database (`usuarios`) with PBKDF2-hashed passwords. Until someone signs in, no profile is active and no protected operation is allowed. The first user must be a manager; afterwards, creating users and destructive actions require the `configurar` permission. Use **Sair (bloquear)** to end a session.
+- **Backups:** daily backups use SQLite's consistent backup API (never a raw file copy) and pass an integrity check. Retention is configurable via `backup_retencao_dias` in `config.json` (default 30). A full backup is taken automatically before any restore.
+- **NF-e import:** the app never fabricates expiration dates or payment terms. When the invoice does not carry the due date, payment condition or the expiration of perishables, the preview asks for them explicitly and blocks the import until they are provided. Duplicate invoices are detected and ignored, and a failed import does not leave orphan product registrations.
+- **Single instance:** a cross-platform lock (Windows `msvcrt` / Unix `flock`) prevents two copies from opening the same SQLite file.
 
 ## Verification
 
-```powershell
-.venv\Scripts\python.exe -m unittest test_gestao -v
+```bash
+# Windows
+.venv\Scripts\python.exe -m unittest test_gestao test_correcoes -v
 .venv\Scripts\python.exe test_interface.py
+
+# Linux / macOS
+.venv/bin/python -m unittest test_gestao test_correcoes -v
+.venv/bin/python test_interface.py
 ```
 
 The regression suite redirects database operations to temporary files. The interface smoke test requires a desktop session and disables scale/printer activity. Do not use its optional live-store flags for a portfolio demo. See [verification notes](docs/PORTFOLIO_VALIDATION.md).
@@ -41,7 +67,10 @@ The regression suite redirects database operations to temporary files. The inter
 | `operacoes.py`, `gestao.py` | Retail operations and finance rules |
 | `producao.py`, `validade.py` | Recipes, production and expiration batches |
 | `balanca.py`, `impressora.py` | Hardware integration |
-| `test_gestao.py`, `test_interface.py` | Regression and UI smoke tests |
+| `applock.py` | Cross-platform single-instance lock |
+| `backup.py` | Consistent SQLite backups, retention and restore |
+| `importar_nfe.py` | Supplier invoice (NF-e) import with safe preview |
+| `test_gestao.py`, `test_correcoes.py`, `test_interface.py` | Regression, security/import/backup and UI smoke tests |
 
 ## Limitations
 

@@ -23,7 +23,10 @@ class ErroGestao(ValueError):
 
 
 USUARIO = 'Sistema local'
-PERFIL = 'gerente'
+# Nenhum perfil privilegiado por padrão: enquanto ninguém se autenticar, o
+# sistema não libera nenhuma operação protegida. O perfil só é definido por
+# gestao.autenticar() após a verificação da senha do usuário.
+PERFIL = None
 PERMISSOES = {
     'gerente': {'venda', 'estoque', 'financeiro', 'configurar', 'credito', 'estornar'},
     'caixa': {'venda'}, 'estoque': {'estoque'},
@@ -562,11 +565,26 @@ def resumo_financeiro(inicio,fim):
     finally: c.close()
 
 
+def _hash_senha(senha, salt):
+    return hashlib.pbkdf2_hmac('sha256', senha.encode(), bytes.fromhex(salt), 260000).hex()
+
+
+def tem_usuarios():
+    """True se já existe ao menos um usuário ativo cadastrado."""
+    return bool(consultar('SELECT 1 FROM usuarios WHERE ativo=1 LIMIT 1'))
+
+
 def criar_usuario(nome,senha,perfil):
-    permitir('configurar')
+    # O primeiro usuário (gerente) é criado no primeiro acesso, quando ainda
+    # não existe nenhum — só aí o cadastro é liberado sem autenticação prévia.
+    # Depois disso, criar usuários exige permissão de configuração.
+    if tem_usuarios():
+        permitir('configurar')
+    elif perfil!='gerente':
+        raise ErroGestao('O primeiro usuário do sistema precisa ser gerente.')
     if len(senha)<8 or not nome.strip() or perfil not in PERMISSOES: raise ErroGestao('Nome, perfil e senha com pelo menos 8 caracteres são obrigatórios.')
     salt=secrets.token_hex(16)
-    hashed=hashlib.pbkdf2_hmac('sha256',senha.encode(),bytes.fromhex(salt),260000).hex()
+    hashed=_hash_senha(senha,salt)
     with transacao() as c:
         c.execute('INSERT INTO usuarios(nome,perfil,salt,senha_hash) VALUES(?,?,?,?)',(nome.strip(),perfil,salt,hashed))
         auditar(c,'criar','usuario',nome,{'perfil':perfil})
@@ -576,10 +594,39 @@ def autenticar(nome,senha):
     global USUARIO,PERFIL
     rows=consultar('SELECT * FROM usuarios WHERE nome=? AND ativo=1',(nome,))
     if rows:
-        r=rows[0]; hashed=hashlib.pbkdf2_hmac('sha256',senha.encode(),bytes.fromhex(r['salt']),260000).hex()
+        r=rows[0]; hashed=_hash_senha(senha,r['salt'])
         if secrets.compare_digest(hashed,r['senha_hash']):
             USUARIO,PERFIL=r['nome'],r['perfil']; return True
     return False
+
+
+def sair():
+    """Encerra a sessão do usuário: volta ao estado não autenticado, sem
+    nenhuma permissão, até que alguém entre novamente."""
+    global USUARIO,PERFIL
+    USUARIO,PERFIL='Sistema local',None
+
+
+def alterar_senha(usuario,senha_nova,senha_atual=None):
+    """Troca a senha de um usuário do banco (fonte única de autenticação).
+    Um gerente pode redefinir a senha de outro usuário; trocar a própria
+    senha exige informar a senha atual."""
+    global USUARIO,PERFIL
+    if len(senha_nova or '')<8: raise ErroGestao('A nova senha deve ter pelo menos 8 caracteres.')
+    rows=consultar('SELECT * FROM usuarios WHERE nome=? AND ativo=1',(usuario,))
+    if not rows: raise ErroGestao('Usuário não encontrado.')
+    r=rows[0]
+    proprio=USUARIO==usuario
+    if proprio:
+        if senha_atual is None: raise ErroGestao('Informe a senha atual para alterá-la.')
+        if not secrets.compare_digest(_hash_senha(senha_atual,r['salt']),r['senha_hash']):
+            raise ErroGestao('Senha atual incorreta.')
+    else:
+        permitir('configurar')
+    salt=secrets.token_hex(16)
+    with transacao() as c:
+        c.execute('UPDATE usuarios SET salt=?,senha_hash=? WHERE id=?',(salt,_hash_senha(senha_nova,salt),r['id']))
+        auditar(c,'alterar_senha','usuario',usuario)
 
 
 def exportar_csv(caminho,rows):

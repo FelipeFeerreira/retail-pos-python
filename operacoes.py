@@ -209,7 +209,13 @@ def detalhar_venda(venda_id):
     try:
         v=conn.execute('SELECT v.*,c.nome AS cliente_nome FROM vendas v LEFT JOIN clientes c ON c.id=v.cliente_id WHERE v.id=?',(venda_id,)).fetchone()
         if not v: raise ErroOperacao('Venda não encontrada.')
-        its=conn.execute('SELECT p.nome,p.unidade,iv.quantidade,iv.preco_unitario FROM itens_venda iv JOIN produtos p ON p.id=iv.produto_id WHERE iv.venda_id=?',(venda_id,)).fetchall(); r=dict(v); r['itens']=[dict(x) for x in its]; return r
+        its=conn.execute('SELECT p.nome,p.unidade,iv.quantidade,iv.preco_unitario FROM itens_venda iv JOIN produtos p ON p.id=iv.produto_id WHERE iv.venda_id=?',(venda_id,)).fetchall(); r=dict(v); r['itens']=[dict(x) for x in its]
+        try:
+            pg=conn.execute('SELECT forma,valor_centavos FROM venda_pagamentos WHERE venda_id=? ORDER BY id',(venda_id,)).fetchall()
+        except sqlite3.OperationalError:
+            pg=[]
+        r['pagamentos']=[{'forma':x['forma'],'valor':x['valor_centavos']/100} for x in pg]
+        return r
     finally: conn.close()
 
 def listar_clientes(busca=''):

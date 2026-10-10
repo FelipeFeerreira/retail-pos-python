@@ -16,7 +16,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import database as db
 import operacoes as op
 import analises as an
-from importar_planilha import importar
+import importar_planilha as iplan
 from backup import backup_diario, registrar_fiado_recente
 from impressora import impressoras_windows, imprimir_cupom, testar_impressao, largura_papel, carregar_config, salvar_config
 from idioma import T, definir_idioma, idioma_atual
@@ -1253,6 +1253,7 @@ class App(GestaoMixin, tk.Tk):
             'pix': 'PIX',
             'voucher': 'VOUCHER',
             'fiado': 'FIADO',
+            'misto': 'PAGAMENTO DIVIDIDO',
         }
 
         def pontilhado(rotulo, valor):
@@ -1308,6 +1309,11 @@ class App(GestaoMixin, tk.Tk):
 
         forma_txt = _FORMA_TXT.get(venda['forma_pagamento'], venda['forma_pagamento'].upper())
         l.append(('b', pontilhado('Pagamento', forma_txt)))
+        # Pagamento dividido: detalha cada forma e o valor de cada parte.
+        for pg in venda.get('pagamentos') or []:
+            if len(venda['pagamentos']) > 1:
+                rotulo = _FORMA_TXT.get(pg['forma'], pg['forma'].upper())
+                l.append(('n', pontilhado(rotulo, self._moeda(pg['valor']))))
         if venda.get('voucher_marca'):
             l.append(('n', pontilhado('Bandeira', venda['voucher_marca'])))
         if venda.get('cliente_nome'):
@@ -1675,8 +1681,21 @@ class App(GestaoMixin, tk.Tk):
         if not caminho:
             return
         try:
-            r = importar(caminho)
-            messagebox.showinfo('Importação', f"{r['inseridos']} novos, {r['atualizados']} atualizados")
+            plano = iplan.pre_visualizar(caminho)
+        except Exception as exc:
+            messagebox.showerror('Erro ao ler a planilha', str(exc))
+            return
+        resumo = (f"{plano['inseridos_previstos']} produto(s) novo(s) e "
+                  f"{plano['atualizados_previstos']} a atualizar. "
+                  f"{len(plano['ignorados'])} linha(s) serão ignoradas.")
+        if not messagebox.askyesno('Importar planilha', resumo + '\n\nNada foi gravado ainda. Confirmar?'):
+            return
+        try:
+            r = iplan.aplicar(caminho, plano)
+            msg = f"{r['inseridos']} novos, {r['atualizados']} atualizados"
+            if r['ignorados']:
+                msg += f", {len(r['ignorados'])} ignorados"
+            messagebox.showinfo('Importação', msg)
             self._carrega_produtos()
         except Exception as exc:
             messagebox.showerror('Erro', str(exc))
@@ -5266,10 +5285,16 @@ class App(GestaoMixin, tk.Tk):
             quando = datetime.strptime(venda['data_hora'], '%Y-%m-%d %H:%M:%S').strftime('%d/%m/%Y %H:%M')
         except ValueError:
             quando = venda['data_hora']
-        info = f"{quando}  ·  {venda['forma_pagamento']}"
+        info = f"{quando}  ·  {op.rotulo_forma_pagamento(venda['forma_pagamento'])}"
         if venda.get('cliente_nome'):
             info += f"  ·  {venda['cliente_nome']}"
         tk.Label(dlg, text=info, bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 9)).pack(anchor='w', padx=24, pady=(0, 12))
+        pagamentos = venda.get('pagamentos') or []
+        if len(pagamentos) > 1:
+            partes = '   ·   '.join(
+                f"{op.rotulo_forma_pagamento(p['forma'])} {self._moeda(p['valor'])}" for p in pagamentos)
+            tk.Label(dlg, text=f'Pagamento dividido: {partes}', bg=COR['branco'], fg=COR['ambar'],
+                     font=(FONTE, 9, 'bold')).pack(anchor='w', padx=24, pady=(0, 10))
 
         tabela = tk.Frame(dlg, highlightbackground=COR['linha'], highlightthickness=1)
         tabela.pack(fill='both', expand=True, padx=24)

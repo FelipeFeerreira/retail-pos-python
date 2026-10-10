@@ -105,3 +105,10 @@ CREATE TABLE IF NOT EXISTS itens_compra (
  produto_id INTEGER NOT NULL REFERENCES produtos(id), quantidade REAL NOT NULL,
  custo_unitario REAL NOT NULL, validade TEXT
 );
+-- Detalhamento do pagamento dividido (venda com mais de uma forma): guarda
+-- cada parte para o recibo e o histórico mostrarem como foi realmente pago.
+CREATE TABLE IF NOT EXISTS venda_pagamentos (
+ id INTEGER PRIMARY KEY, venda_id INTEGER NOT NULL REFERENCES vendas(id),
+ forma TEXT NOT NULL, valor_centavos INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_venda_pagamentos ON venda_pagamentos(venda_id);

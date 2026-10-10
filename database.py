@@ -6,6 +6,28 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'mercadinho.db')
 SCHEMA_PATH = os.path.join(BASE_DIR, 'schema.sql')
 
+# Versão do esquema. Sempre que aumentar, o init_db faz um backup consistente
+# do banco antes de aplicar qualquer mudança (migração não destrutiva).
+SCHEMA_VERSAO = 2
+
+
+def _backup_antes_migracao():
+    """Cópia consistente (API do SQLite) antes de migrar um banco existente."""
+    from datetime import datetime
+    pasta = os.path.join(os.path.dirname(DB_PATH), 'backups')
+    os.makedirs(pasta, exist_ok=True)
+    destino = os.path.join(pasta, f'antes_migracao_v{SCHEMA_VERSAO}_{datetime.now().strftime("%Y-%m-%d_%H%M%S")}.db')
+    origem = sqlite3.connect(DB_PATH)
+    copia = sqlite3.connect(destino)
+    try:
+        origem.backup(copia)
+        if copia.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+            raise RuntimeError('Backup pré-migração não íntegro.')
+    finally:
+        origem.close()
+        copia.close()
+    return destino
+
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH, timeout=20)
@@ -21,22 +43,29 @@ def _colunas(conn, tabela):
 
 
 def init_db():
-    # Cópia consistente antes de qualquer mudança estrutural em banco existente.
-    if os.path.exists(DB_PATH) and os.path.getsize(DB_PATH):
-        origem = sqlite3.connect(DB_PATH)
+    existe = os.path.exists(DB_PATH) and os.path.getsize(DB_PATH)
+    # Backup pré-migração: só quando já existe banco e a versão gravada é
+    # menor que a do código (ou seja, há migração a aplicar). Bancos novos não
+    # precisam. Assim as migrações ficam versionadas, repetíveis e reversíveis.
+    if existe:
         try:
-            tem_gestao=origem.execute("SELECT 1 FROM sqlite_master WHERE name='gestao_config'").fetchone()
-            if not tem_gestao:
-                pasta=os.path.join(os.path.dirname(DB_PATH),'backups')
-                os.makedirs(pasta,exist_ok=True)
-                destino=os.path.join(pasta,'antes_migracao_gestao.db')
-                if not os.path.exists(destino):
-                    copia=sqlite3.connect(destino)
-                    try: origem.backup(copia)
-                    finally: copia.close()
-        finally: origem.close()
+            origem = sqlite3.connect(DB_PATH)
+            try:
+                tem_meta = origem.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='schema_meta'").fetchone()
+                versao = 0
+                if tem_meta:
+                    r = origem.execute("SELECT valor FROM schema_meta WHERE chave='versao'").fetchone()
+                    versao = int(r[0]) if r else 0
+            finally:
+                origem.close()
+            if versao < SCHEMA_VERSAO:
+                _backup_antes_migracao()
+        except (sqlite3.DatabaseError, ValueError):
+            pass
     conn = get_conn()
     try:
+        conn.execute('CREATE TABLE IF NOT EXISTS schema_meta (chave TEXT PRIMARY KEY, valor TEXT NOT NULL)')
         with open(SCHEMA_PATH, 'r', encoding='utf-8') as f:
             conn.executescript(f.read())
 
@@ -191,6 +220,7 @@ def init_db():
         conn.execute('CREATE INDEX IF NOT EXISTS idx_perdas_data ON perdas(data_hora)')
         from gestao import migrar
         migrar(conn)
+        conn.execute("INSERT OR REPLACE INTO schema_meta(chave,valor) VALUES('versao',?)", (str(SCHEMA_VERSAO),))
         conn.commit()
     finally:
         conn.close()

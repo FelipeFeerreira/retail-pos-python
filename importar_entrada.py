@@ -17,7 +17,7 @@ Uso pela interface: Arquivo -> Importar entrada de mercadoria.
 from __future__ import annotations
 
 import os
-import shutil
+import sqlite3
 from datetime import datetime
 
 import database as db
@@ -183,10 +183,19 @@ def pre_visualizar(caminho_planilha):
 
 
 def _backup_antes_de_gravar():
+    """Backup consistente (API do SQLite) antes de qualquer gravação."""
     pasta = os.path.join(os.path.dirname(os.path.abspath(db.DB_PATH)), 'backups')
     os.makedirs(pasta, exist_ok=True)
     destino = os.path.join(pasta, f'mercadinho_antes_entrada_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db')
-    shutil.copy2(db.DB_PATH, destino)
+    origem = sqlite3.connect(db.DB_PATH)
+    copia = sqlite3.connect(destino)
+    try:
+        origem.backup(copia)
+        if copia.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+            raise RuntimeError('Backup não íntegro antes da entrada de mercadoria.')
+    finally:
+        origem.close()
+        copia.close()
     return destino
 
 

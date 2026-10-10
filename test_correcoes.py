@@ -111,6 +111,85 @@ class ArredondamentoTest(BaseTemp):
                                'dinheiro', total_esperado=8.32)
 
 
+class VendaDivididaTest(BaseTemp):
+    def setUp(self):
+        super().setUp()
+        g.abrir_caixa(0)
+        self.pid = op.criar_produto('PRODUTO X', preco_custo=2, preco_venda=10,
+                                    quantidade_estoque=20)
+
+    def test_pagamento_dividido_registra_partes(self):
+        venda = op.registrar_venda([{'produto_id': self.pid, 'quantidade': 2}],
+                                   pagamentos=[{'forma': 'dinheiro', 'valor': 10},
+                                               {'forma': 'pix', 'valor': 10}])
+        self.assertEqual(venda['valor_total'], 20)
+        det = op.detalhar_venda(venda['id'])
+        self.assertEqual(det['forma_pagamento'], 'misto')
+        formas = {p['forma']: p['valor'] for p in det['pagamentos']}
+        self.assertEqual(formas, {'dinheiro': 10.0, 'pix': 10.0})
+
+    def test_pagamento_dividido_soma_errada_bloqueia(self):
+        with self.assertRaises(op.ErroOperacao):
+            op.registrar_venda([{'produto_id': self.pid, 'quantidade': 2}],
+                               pagamentos=[{'forma': 'dinheiro', 'valor': 5},
+                                           {'forma': 'pix', 'valor': 5}])
+        self.assertEqual(g.consultar('SELECT COUNT(*) n FROM vendas')[0]['n'], 0)
+
+
+class CancelamentoTest(BaseTemp):
+    def test_cancelar_restaura_estoque_e_estorna_caixa(self):
+        g.abrir_caixa(0)
+        pid = op.criar_produto('PRODUTO Y', preco_custo=2, preco_venda=10,
+                               quantidade_estoque=20)
+        venda = op.registrar_venda([{'produto_id': pid, 'quantidade': 3}], 'dinheiro')
+        self.assertEqual(op.obter_produto(pid)['quantidade_estoque'], 17)
+        g.cancelar_venda(venda['id'], 'Cliente desistiu')
+        self.assertEqual(op.obter_produto(pid)['quantidade_estoque'], 20)
+        # O caixa volta ao valor de abertura (0) — a entrada foi estornada.
+        saldo = next(r['saldo_centavos'] for r in g.contas_saldos() if r['id'] == 1)
+        self.assertEqual(saldo, 0)
+
+
+class PlanilhaImportTest(BaseTemp):
+    def _planilha(self, linhas):
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = 'Mercearia'
+        ws.append(['DESCRIÇÃO', 'PREÇO', 'UNIDADE', 'EAN'])
+        for nome, preco, unidade, ean in linhas:
+            ws.append([nome, preco, unidade, ean])
+        caminho = Path(self.temp.name) / 'planilha.xlsx'
+        wb.save(caminho)
+        return str(caminho)
+
+    def test_preview_e_aplicar_com_transacao(self):
+        import importar_planilha as iplan
+        caminho = self._planilha([
+            ('ARROZ', 8.0, 'UN', '7891234567895'),
+            ('FEIJAO', 6.0, 'UN', '7891234567802'),
+        ])
+        plano = iplan.pre_visualizar(caminho)
+        self.assertEqual(plano['inseridos_previstos'], 2)
+        # Nada gravado na pré-visualização.
+        self.assertEqual(g.consultar("SELECT COUNT(*) n FROM produtos WHERE nome IN ('ARROZ','FEIJAO')")[0]['n'], 0)
+        r = iplan.aplicar(caminho, plano)
+        self.assertEqual(r['inseridos'], 2)
+        self.assertEqual(op.obter_produto(op.buscar_por_codigo('7891234567895')['id'])['preco_venda'], 8.0)
+        # Reimportar atualiza, não duplica.
+        plano2 = iplan.pre_visualizar(caminho)
+        self.assertEqual(plano2['atualizados_previstos'], 2)
+        iplan.aplicar(caminho, plano2)
+        self.assertEqual(g.consultar("SELECT COUNT(*) n FROM produtos WHERE nome='ARROZ'")[0]['n'], 1)
+
+    def test_preco_negativo_rejeitado(self):
+        import importar_planilha as iplan
+        caminho = self._planilha([('PRODUTO RUIM', -5.0, 'UN', '7891234567895')])
+        plano = iplan.pre_visualizar(caminho)
+        self.assertEqual(plano['inseridos_previstos'], 0)
+        self.assertTrue(any('negativo' in i['motivo'] for i in plano['ignorados']))
+
+
 class NfeImportTest(BaseTemp):
     def setUp(self):
         super().setUp()

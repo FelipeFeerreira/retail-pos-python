@@ -10,10 +10,18 @@ barras, ou mesmo nome+categoria para itens de balança) são ATUALIZADOS
 de custo que você já tiver preenchido no sistema. Produtos novos são
 cadastrados com estoque 0, para você contar e lançar de verdade.
 
+Duas etapas, sempre: nada é gravado sem passar pela pré-visualização.
+
+    pre_visualizar(caminho)   -> só lê e monta o que SERIA feito
+    aplicar(caminho, plano)   -> faz backup e grava numa única transação
+
 Uso:
     python importar_planilha.py caminho/da/planilha.xlsx
 """
+import os
+import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -46,97 +54,162 @@ def achar_coluna(cabecalho, padroes):
     return None
 
 
-def importar(caminho_planilha):
-    import gestao as _gestao
-    _gestao.permitir('estoque')
+def _backup_antes_de_gravar():
+    """Backup consistente (API do SQLite) antes de qualquer gravação."""
+    pasta = os.path.join(os.path.dirname(os.path.abspath(db.DB_PATH)), 'backups')
+    os.makedirs(pasta, exist_ok=True)
+    destino = os.path.join(pasta, f'mercadinho_antes_planilha_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db')
+    origem = sqlite3.connect(db.DB_PATH)
+    copia = sqlite3.connect(destino)
+    try:
+        origem.backup(copia)
+        if copia.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+            raise RuntimeError('Backup não íntegro antes da importação da planilha.')
+    finally:
+        origem.close()
+        copia.close()
+    return destino
+
+
+def _montar_plano(caminho_planilha):
+    """Lê a planilha e monta o plano, SEM gravar nada. Cada item já vem com
+    a ação (cadastrar/atualizar), o produto existente e os avisos."""
     wb = openpyxl.load_workbook(caminho_planilha, data_only=True)
     conn = db.get_conn()
+    itens, ignorados = [], []
+    try:
+        for nome_aba in wb.sheetnames:
+            ws = wb[nome_aba]
+            eh_balanca = nome_aba.strip().upper() == "BALANÇA"
+            categoria = "Balança" if eh_balanca else nome_aba.strip()
 
-    inseridos = 0
-    atualizados = 0
-    ignorados = []
-    avisos_codigo_repetido = []
+            primeira_linha = next(ws.iter_rows(min_row=1, max_row=1))
+            cabecalho = [str(c.value).strip() if c.value else "" for c in primeira_linha]
 
-    for nome_aba in wb.sheetnames:
-        ws = wb[nome_aba]
-        eh_balanca = nome_aba.strip().upper() == "BALANÇA"
-        categoria = "Balança" if eh_balanca else nome_aba.strip()
+            col_desc = achar_coluna(cabecalho, ["DESCRIÇÃO", "DESCRICAO", "PRODUTO", "NOME"])
+            col_preco = achar_coluna(cabecalho, ["PREÇO", "PRECO", "VALOR"])
+            col_unidade = achar_coluna(cabecalho, ["UNIDADE"])
+            col_codigo = None if eh_balanca else achar_coluna(cabecalho, ["EAN", "BARRAS", "CÓDIGO", "CODIGO"])
 
-        primeira_linha = next(ws.iter_rows(min_row=1, max_row=1))
-        cabecalho = [str(c.value).strip() if c.value else "" for c in primeira_linha]
-
-        col_desc = achar_coluna(cabecalho, ["DESCRIÇÃO", "DESCRICAO", "PRODUTO", "NOME"])
-        col_preco = achar_coluna(cabecalho, ["PREÇO", "PRECO", "VALOR"])
-        col_unidade = achar_coluna(cabecalho, ["UNIDADE"])
-        col_codigo = None if eh_balanca else achar_coluna(cabecalho, ["EAN", "BARRAS", "CÓDIGO", "CODIGO"])
-
-        if col_desc is None or col_preco is None:
-            ignorados.append((categoria, "(aba inteira)", "não encontrei as colunas de descrição/preço nessa aba"))
-            continue
-
-        for linha in ws.iter_rows(min_row=2, values_only=True):
-            if linha is None or all(v is None for v in linha):
-                continue
-            descricao = str(linha[col_desc] or "").strip()
-            if not descricao:
-                continue
-            if descricao.upper() in DESCRICOES_IGNORADAS:
-                ignorados.append((categoria, descricao, "item genérico/placeholder da balança, sem preço real"))
+            if col_desc is None or col_preco is None:
+                ignorados.append({"categoria": categoria, "produto": "(aba inteira)",
+                                  "motivo": "não encontrei as colunas de descrição/preço nessa aba"})
                 continue
 
-            preco_bruto = linha[col_preco]
-            try:
-                preco = round(float(preco_bruto), 2)
-            except (TypeError, ValueError):
-                ignorados.append((categoria, descricao, f"preço inválido ({preco_bruto!r})"))
-                continue
+            for linha in ws.iter_rows(min_row=2, values_only=True):
+                if linha is None or all(v is None for v in linha):
+                    continue
+                descricao = str(linha[col_desc] or "").strip()
+                if not descricao:
+                    continue
+                if descricao.upper() in DESCRICOES_IGNORADAS:
+                    ignorados.append({"categoria": categoria, "produto": descricao,
+                                      "motivo": "item genérico/placeholder da balança, sem preço real"})
+                    continue
 
-            unidade = "KG" if eh_balanca else "UN"
-            if col_unidade is not None:
-                valor_unidade = str(linha[col_unidade] or "").strip().upper()
-                if valor_unidade in ("UN", "KG"):
-                    unidade = valor_unidade
+                preco_bruto = linha[col_preco]
+                try:
+                    preco = round(float(preco_bruto), 2)
+                except (TypeError, ValueError):
+                    ignorados.append({"categoria": categoria, "produto": descricao,
+                                      "motivo": f"preço inválido ({preco_bruto!r})"})
+                    continue
+                if preco < 0:
+                    ignorados.append({"categoria": categoria, "produto": descricao,
+                                      "motivo": f"preço negativo ({preco:.2f})"})
+                    continue
 
-            codigo_barras = limpar_codigo(linha[col_codigo]) if col_codigo is not None else None
+                unidade = "KG" if eh_balanca else "UN"
+                if col_unidade is not None:
+                    valor_unidade = str(linha[col_unidade] or "").strip().upper()
+                    if valor_unidade in ("UN", "KG"):
+                        unidade = valor_unidade
 
-            existente = None
-            if codigo_barras:
-                existente = conn.execute(
-                    "SELECT id FROM produtos WHERE codigo_barras = ?", (codigo_barras,)
-                ).fetchone()
-                if existente:
-                    avisos_codigo_repetido.append((categoria, descricao, codigo_barras))
-            else:
-                existente = conn.execute(
-                    "SELECT id FROM produtos WHERE nome = ? AND categoria = ?", (descricao, categoria)
-                ).fetchone()
+                codigo_barras = limpar_codigo(linha[col_codigo]) if col_codigo is not None else None
 
-            if existente:
+                existente = None
+                if codigo_barras:
+                    existente = conn.execute(
+                        "SELECT id FROM produtos WHERE codigo_barras = ?", (codigo_barras,)).fetchone()
+                else:
+                    existente = conn.execute(
+                        "SELECT id FROM produtos WHERE nome = ? AND categoria = ?",
+                        (descricao, categoria)).fetchone()
+
+                avisos = []
+                if preco == 0:
+                    avisos.append('preço zero — confira depois')
+                itens.append({
+                    'categoria': categoria, 'descricao': descricao, 'preco': preco,
+                    'unidade': unidade, 'codigo_barras': codigo_barras,
+                    'acao': 'atualizar' if existente else 'cadastrar',
+                    'produto_id': existente['id'] if existente else None,
+                    'avisos': avisos,
+                })
+    finally:
+        conn.close()
+    return {
+        'itens': itens,
+        'ignorados': ignorados,
+        'inseridos_previstos': sum(1 for i in itens if i['acao'] == 'cadastrar'),
+        'atualizados_previstos': sum(1 for i in itens if i['acao'] == 'atualizar'),
+    }
+
+
+def pre_visualizar(caminho_planilha):
+    """Monta o plano de importação para conferir antes de gravar."""
+    import gestao as _gestao
+    _gestao.permitir('estoque')
+    return _montar_plano(caminho_planilha)
+
+
+def aplicar(caminho_planilha, plano=None):
+    """Grava o plano numa única transação (tudo ou nada). Faz backup antes."""
+    import gestao as _gestao
+    _gestao.permitir('estoque')
+    plano = plano or _montar_plano(caminho_planilha)
+    backup = _backup_antes_de_gravar()
+
+    inseridos = atualizados = 0
+    conn = db.get_conn()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        for item in plano['itens']:
+            if item['acao'] == 'atualizar':
                 conn.execute(
                     """UPDATE produtos SET nome = ?, categoria = ?, unidade = ?, preco_venda = ?,
-                       codigo_barras = COALESCE(?, codigo_barras)
-                       WHERE id = ?""",
-                    (descricao, categoria, unidade, preco, codigo_barras, existente["id"]),
-                )
+                       codigo_barras = COALESCE(?, codigo_barras) WHERE id = ?""",
+                    (item['descricao'], item['categoria'], item['unidade'], item['preco'],
+                     item['codigo_barras'], item['produto_id']))
                 atualizados += 1
             else:
                 conn.execute(
                     """INSERT INTO produtos
                        (codigo_barras, nome, categoria, unidade, preco_custo, preco_venda, quantidade_estoque, estoque_minimo)
                        VALUES (?, ?, ?, ?, 0, ?, 0, ?)""",
-                    (codigo_barras, descricao, categoria, unidade, preco, 2 if unidade == "KG" else 5),
-                )
+                    (item['codigo_barras'], item['descricao'], item['categoria'], item['unidade'],
+                     item['preco'], 2 if item['unidade'] == 'KG' else 5))
                 inseridos += 1
-
-    conn.commit()
-    conn.close()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
     return {
-        "inseridos": inseridos,
-        "atualizados": atualizados,
-        "ignorados": [{"categoria": c, "produto": d, "motivo": m} for c, d, m in ignorados],
-        "codigos_repetidos": [{"categoria": c, "produto": d, "codigo": cod} for c, d, cod in avisos_codigo_repetido],
+        'backup': backup,
+        'inseridos': inseridos,
+        'atualizados': atualizados,
+        'ignorados': plano['ignorados'],
+        'codigos_repetidos': [],
     }
+
+
+def importar(caminho_planilha):
+    """Compatibilidade: pré-visualiza e aplica numa chamada só."""
+    plano = _montar_plano(caminho_planilha)
+    return aplicar(caminho_planilha, plano)
 
 
 def importar_e_imprimir(caminho_planilha):
@@ -146,10 +219,7 @@ def importar_e_imprimir(caminho_planilha):
     print(f"Linhas ignoradas: {len(resultado['ignorados'])}")
     for item in resultado['ignorados']:
         print(f"  - [{item['categoria']}] {item['produto']}: {item['motivo']}")
-    if resultado['codigos_repetidos']:
-        print(f"\nCódigo de barras repetido na planilha ({len(resultado['codigos_repetidos'])}x) — ficou valendo a última ocorrência:")
-        for item in resultado['codigos_repetidos']:
-            print(f"  - [{item['categoria']}] {item['produto']} ({item['codigo']})")
+    print(f"\nBackup do banco em: {resultado['backup']}")
     return resultado
 
 

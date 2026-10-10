@@ -359,6 +359,7 @@ def registrar_venda(itens, forma_pagamento='dinheiro', desconto=0, cliente_id=No
                 raise ErroGestao('Para pagamento dividido, registre as taxas reais na liquidação do cartão.')
             for f,valor in partes:
                 entrada_pagamento(c,f,valor,'venda',v,taxa if len(partes)==1 else 0)
+                c.execute('INSERT INTO venda_pagamentos(venda_id,forma,valor_centavos) VALUES(?,?,?)',(v,f,valor))
         auditar(c,'venda','vendas',v,{'total':total,'forma':forma_pagamento})
         return {'id':v,'valor_total':total/100,'taxa_paga':taxa/100,'valor_liquido':(total-taxa)/100}
 

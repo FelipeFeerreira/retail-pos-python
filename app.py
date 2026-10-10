@@ -1112,6 +1112,28 @@ class App(GestaoMixin, tk.Tk):
             liquido_final = round(final - taxa_valor, 2)
             return bruto, desc_itens + desc_total, final, taxa_valor, liquido_final
 
+        # Valor recebido em dinheiro + troco (só aparece quando a forma é dinheiro).
+        frame_recebido = tk.Frame(dlg, bg=COR['branco'])
+        tk.Label(frame_recebido, text='Recebido (R$):', bg=COR['branco'], fg=COR['cinza'],
+                 font=(FONTE, 8, 'bold')).pack(side='left')
+        ent_recebido = tk.Entry(frame_recebido, font=('Consolas', 12), width=12, relief='solid', bd=1)
+        ent_recebido.pack(side='left', padx=(4, 14), ipady=4)
+        if self.recebido.get().strip():
+            ent_recebido.insert(0, self.recebido.get().strip())
+        lbl_troco = tk.Label(frame_recebido, text='Troco R$ 0,00', bg=COR['verdeclaro'], fg=COR['verde2'],
+                             font=(FONTE, 11, 'bold'))
+        lbl_troco.pack(side='left', padx=4, ipady=4)
+
+        def atualizar_troco():
+            if self.forma.get() == 'dinheiro':
+                frame_recebido.pack(fill='x', padx=24, pady=(6, 2))
+                _, _, final, _, _ = calcular()
+                receb = self._para_float(ent_recebido.get(), 0)
+                lbl_troco.config(text=f'Troco {self._moeda(max(0, receb - final))}')
+            else:
+                frame_recebido.pack_forget()
+        ent_recebido.bind('<KeyRelease>', lambda e: atualizar_troco())
+
         lbl_taxa = tk.Label(dlg, text='', bg=COR['branco'], fg=COR['ambar'], font=(FONTE, 9, 'bold'))
 
         def atualizar_total():
@@ -1124,6 +1146,7 @@ class App(GestaoMixin, tk.Tk):
                 lbl_taxa.pack(anchor='e', padx=24, pady=(2, 0))
             else:
                 lbl_taxa.pack_forget()
+            atualizar_troco()
         atualizar_total()
 
         pg = tk.Frame(dlg, bg=COR['branco'])
@@ -1157,6 +1180,13 @@ class App(GestaoMixin, tk.Tk):
                 messagebox.showwarning('Cliente', 'Selecione um cliente para venda fiada.', parent=dlg)
                 return
             _, descontos, final, taxa_valor, liquido_final = calcular()
+            if self.forma.get() == 'dinheiro':
+                receb = self._para_float(ent_recebido.get(), 0)
+                if receb and receb + 0.005 < final:
+                    messagebox.showwarning('Valor recebido',
+                                           f'O valor recebido ({self._moeda(receb)}) é menor que o total '
+                                           f'da venda ({self._moeda(final)}).', parent=dlg)
+                    return
             _pct, bandeira = self._taxa_da_forma()
             try:
                 venda = op.registrar_venda(

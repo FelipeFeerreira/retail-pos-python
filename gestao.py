@@ -52,6 +52,17 @@ def centavos(valor):
         raise ErroGestao('Informe um valor monetário válido.')
 
 
+def centavos_itens(itens):
+    """Soma o valor de itens (com 'preco_unitario' e 'quantidade') em centavos,
+    arredondando item a item — exatamente a mesma regra usada por
+    registrar_venda, para o PDV e o back-end nunca divergirem por
+    arredondamento (ex.: 0,185 kg × R$ 45,00)."""
+    total = 0
+    for it in itens:
+        total += centavos(Decimal(str(it['preco_unitario'])) * Decimal(str(it['quantidade'])))
+    return total
+
+
 def quantidade(valor):
     try:
         n = float(str(valor).replace(',', '.'))

@@ -777,11 +777,15 @@ class GestaoMixin:
 
     def _venda_dividida_ui(self):
         if not self.carrinho: raise g.ErroGestao('Monte a venda no PDV antes de dividir o pagamento.')
-        total=sum(i['quantidade']*i['preco_unitario'] for i in self.carrinho)-sum(i.get('desconto',0) for i in self.carrinho)
+        # Total em centavos, item a item — igual ao back-end, para a soma dos
+        # meios de pagamento bater exatamente com o total calculado.
+        bruto_c=g.centavos_itens(self.carrinho)
+        desc_c=sum(g.centavos(i.get('desconto',0)) for i in self.carrinho)
+        total=max(0,bruto_c-desc_c)/100
         formas=['dinheiro','pix','cartao_credito','cartao_debito']; chave=uuid.uuid4().hex
         def salvar(v):
             itens=[{'produto_id':i['produto_id'],'quantidade':i['quantidade']} for i in self.carrinho]
-            venda=op.registrar_venda(itens,desconto=sum(i.get('desconto',0) for i in self.carrinho),cliente_id=self.cliente_fiado['id'] if self.cliente_fiado else None,chave_operacao=chave,pagamentos=[{'forma':v['forma1'],'valor':v['valor1']},{'forma':v['forma2'],'valor':v['valor2']}])
+            venda=op.registrar_venda(itens,desconto=desc_c/100,cliente_id=self.cliente_fiado['id'] if self.cliente_fiado else None,chave_operacao=chave,pagamentos=[{'forma':v['forma1'],'valor':v['valor1']},{'forma':v['forma2'],'valor':v['valor2']}])
             self._ultimo_venda=venda['id']; self.carrinho=[]; self.cliente_fiado=None; self.label_cliente.config(text='Nenhum'); self._render_car()
             self._toast(f"Venda #{venda['id']} concluída com pagamento dividido.")
         self._formulario('Pagamento dividido',[('forma1','Primeiro meio','dinheiro',formas),('valor1','Valor do primeiro meio (R$)','',None),('forma2','Segundo meio','pix',formas),('valor2','Valor do segundo meio (R$)','',None)],salvar,f'Total do carrinho: {self._moeda(total)}. A soma precisa coincidir exatamente. Taxas de cartão são conferidas na liquidação.')

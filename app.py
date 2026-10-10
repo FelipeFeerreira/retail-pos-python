@@ -11,6 +11,7 @@ import hashlib
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 from datetime import datetime, date
+from decimal import Decimal, ROUND_HALF_UP
 
 import database as db
 import operacoes as op
@@ -710,6 +711,12 @@ class App(GestaoMixin, tk.Tk):
         return f'{qtd:.0f}'
 
     def _moeda(self, valor):
+        # Arredonda com ROUND_HALF_UP (igual ao back-end), para a tela nunca
+        # mostrar um centavo diferente do que foi gravado.
+        try:
+            valor = Decimal(str(valor)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        except Exception:
+            pass
         return f'R$ {valor:,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.')
 
     def _busca_tecla(self, event):
@@ -1100,17 +1107,24 @@ class App(GestaoMixin, tk.Tk):
         lbl_total.pack(fill='x', padx=24, pady=(8, 10), ipady=10)
 
         def calcular():
-            bruto = sum(i['quantidade'] * i['preco_unitario'] for i in self.carrinho)
-            desc_itens = sum(i.get('desconto', 0) for i in self.carrinho)
-            liquido = max(0, bruto - desc_itens)
+            # Tudo em centavos inteiros, arredondando item a item — a MESMA
+            # regra de gestao.registrar_venda, para não dar divergência de
+            # arredondamento (ex.: 0,185 kg × R$ 45,00 = 8,325 → 8,33).
+            bruto_c = g.centavos_itens(self.carrinho)
+            desc_itens_c = sum(g.centavos(i.get('desconto', 0)) for i in self.carrinho)
+            liquido_c = max(0, bruto_c - desc_itens_c)
             valor_campo = self._para_float(entrada_desc.get(), 0)
-            desc_total = liquido * (valor_campo / 100) if modo.get() == 'pct' else valor_campo
-            desc_total = max(0, min(desc_total, liquido))
-            final = max(0, liquido - desc_total)
+            if modo.get() == 'pct':
+                desc_total_c = g.centavos(Decimal(liquido_c) * Decimal(str(valor_campo)) / Decimal(10000))
+            else:
+                desc_total_c = g.centavos(valor_campo)
+            desc_total_c = max(0, min(desc_total_c, liquido_c))
+            final_c = max(0, liquido_c - desc_total_c)
             taxa_pct, _bandeira = self._taxa_da_forma()
-            taxa_valor = round(final * (taxa_pct / 100), 2)
-            liquido_final = round(final - taxa_valor, 2)
-            return bruto, desc_itens + desc_total, final, taxa_valor, liquido_final
+            taxa_c = g.centavos(Decimal(final_c) * Decimal(str(taxa_pct)) / Decimal(10000))
+            liquido_final_c = final_c - taxa_c
+            return (bruto_c / 100, (desc_itens_c + desc_total_c) / 100,
+                    final_c / 100, taxa_c / 100, liquido_final_c / 100)
 
         # Valor recebido em dinheiro + troco (só aparece quando a forma é dinheiro).
         frame_recebido = tk.Frame(dlg, bg=COR['branco'])
@@ -1282,7 +1296,7 @@ class App(GestaoMixin, tk.Tk):
             l.append(('n', f'{desc}{"." * pontos}{sub_txt}'))
 
         l.append(('d', tragos))
-        subtotal = round(sum(round(i['quantidade'] * i['preco_unitario'], 2) for i in venda['itens']), 2)
+        subtotal = g.centavos_itens(venda['itens']) / 100
         l.append(('n', pontilhado('Subtotal', self._moeda(subtotal))))
         if venda.get('desconto'):
             l.append(('n', pontilhado('Descontos', '-' + self._moeda(venda['desconto']))))

@@ -94,6 +94,23 @@ class AutenticacaoTest(BaseTemp):
         self.assertTrue(g.autenticar('admin', 'novasenha1'))
 
 
+class ArredondamentoTest(BaseTemp):
+    def test_total_kg_bate_com_backend(self):
+        g.abrir_caixa(0)
+        pid = op.criar_produto('BACON KG', unidade='KG', preco_custo=30,
+                               preco_venda=45.0, quantidade_estoque=10)
+        # 0,185 kg × R$ 45,00 = 8,325 → arredonda item a item para 8,33
+        bruto_c = g.centavos_itens([{'preco_unitario': 45.0, 'quantidade': 0.185}])
+        self.assertEqual(bruto_c, 833)
+        venda = op.registrar_venda([{'produto_id': pid, 'quantidade': 0.185}],
+                                   'dinheiro', total_esperado=bruto_c / 100)
+        self.assertEqual(venda['valor_total'], 8.33)
+        # O valor "antigo" (tela com ponto flutuante) não pode mais passar.
+        with self.assertRaises(op.ErroOperacao):
+            op.registrar_venda([{'produto_id': pid, 'quantidade': 0.185}],
+                               'dinheiro', total_esperado=8.32)
+
+
 class NfeImportTest(BaseTemp):
     def setUp(self):
         super().setUp()

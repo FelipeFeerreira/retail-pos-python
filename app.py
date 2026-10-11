@@ -177,7 +177,10 @@ class App(GestaoMixin, tk.Tk):
         conf = carregar_config()
         porta = conf.get('balanca_porta', '')
         protocolo = conf.get('balanca_protocolo', 'P05A (Toledo 8217)')
-        self.balanca = LeitorBalanca.criar_para_toledo_8217(porta, protocolo) if porta else LeitorBalanca()
+        baudrate = conf.get('balanca_baudrate')
+        parity = conf.get('balanca_parity')
+        self.balanca = (LeitorBalanca.criar_para_toledo_8217(porta, protocolo, baudrate=baudrate, parity=parity)
+                        if porta else LeitorBalanca())
         self._balanca_status = 'Balança: não configurada'
         if porta:
             ok = self.balanca.iniciar()
@@ -185,32 +188,85 @@ class App(GestaoMixin, tk.Tk):
 
     def _config_balanca(self):
         portas = LeitorBalanca.portas_disponiveis()
+        conf = carregar_config()
         dlg = tk.Toplevel(self)
         dlg.title('Configurar balança')
-        dlg.geometry('560x380')
+        dlg.geometry('620x560')
+        dlg.configure(bg=COR['branco'])
         dlg.transient(self)
         _grab_set_safe(dlg)
-        dlg.bind('<Escape>', lambda e: dlg.destroy())
+        dlg.bind('<Escape>', lambda e: (dlg.destroy(), self._iniciar_balanca()))
 
-        tk.Label(dlg, text='Porta (COM)', font=('Arial', 11, 'bold')).pack(anchor='w', padx=20, pady=(20, 5))
+        tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
+        tk.Label(dlg, text='Balança Toledo 8217 (Prix)', bg=COR['branco'], fg=COR['verde2'],
+                 font=(FONTE, 15, 'bold')).pack(anchor='w', padx=20, pady=(14, 2))
+        tk.Label(dlg, text='Na balança, use o protocolo P05A (parâmetro C09) e o mesmo baud rate configurado aqui (C10, padrão de fábrica 2400).',
+                 bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8), wraplength=560, justify='left').pack(anchor='w', padx=20)
+
+        tk.Label(dlg, text='PORTA SERIAL', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).pack(anchor='w', padx=20, pady=(14, 3))
         dispositivos = [f"{p['device']} — {p['descricao']}" for p in portas]
-        var_porta = tk.StringVar(value=carregar_config().get('balanca_porta', ''))
+        var_porta = tk.StringVar(value=conf.get('balanca_porta', ''))
         combo = ttk.Combobox(dlg, textvariable=var_porta, values=dispositivos)
         combo.pack(fill='x', padx=20)
         _uppercase_ao_digitar(combo)
         if not dispositivos:
-            tk.Label(dlg, text='Nenhuma porta serial detectada automaticamente — digite manualmente (ex.: COM3) acima.',
-                     fg=COR['cinza'], wraplength=500, justify='left').pack(anchor='w', padx=20, pady=(6, 0))
+            tk.Label(dlg, text='Nenhuma porta detectada — digite manualmente (Windows: COM3; Linux: /dev/ttyUSB0).',
+                     bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8), wraplength=560, justify='left').pack(anchor='w', padx=20, pady=(4, 0))
 
-        tk.Label(dlg, text='Protocolo', font=('Arial', 11, 'bold')).pack(anchor='w', padx=20, pady=(16, 5))
-        var_proto = tk.StringVar(value=carregar_config().get('balanca_protocolo', 'P05A (Toledo 8217)'))
-        ttk.Combobox(dlg, textvariable=var_proto, values=list(LeitorBalanca.PROTOCOLOS.keys()), state='readonly').pack(fill='x', padx=20)
+        linha = tk.Frame(dlg, bg=COR['branco'])
+        linha.pack(fill='x', padx=20, pady=(14, 0))
+        col_proto = tk.Frame(linha, bg=COR['branco'])
+        col_proto.pack(side='left', fill='x', expand=True, padx=(0, 8))
+        tk.Label(col_proto, text='PROTOCOLO', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).pack(anchor='w')
+        var_proto = tk.StringVar(value=conf.get('balanca_protocolo', 'P05A (Toledo 8217)'))
+        ttk.Combobox(col_proto, textvariable=var_proto, values=list(LeitorBalanca.PROTOCOLOS.keys()), state='readonly').pack(fill='x')
+        col_baud = tk.Frame(linha, bg=COR['branco'])
+        col_baud.pack(side='left', padx=(0, 8))
+        tk.Label(col_baud, text='BAUD RATE', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).pack(anchor='w')
+        var_baud = tk.StringVar(value=str(conf.get('balanca_baudrate', 2400)))
+        ttk.Combobox(col_baud, textvariable=var_baud, values=[str(b) for b in LeitorBalanca.BAUDRATES], state='readonly', width=8).pack()
+        col_par = tk.Frame(linha, bg=COR['branco'])
+        col_par.pack(side='left')
+        tk.Label(col_par, text='PARIDADE', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).pack(anchor='w')
+        var_par = tk.StringVar(value=LeitorBalanca.PARIDADES.get(conf.get('balanca_parity', 'N'), 'Nenhuma'))
+        ttk.Combobox(col_par, textvariable=var_par, values=list(LeitorBalanca.PARIDADES.values()), state='readonly', width=9).pack()
 
-        resultado = tk.Label(dlg, text='', fg=COR['cinza'], justify='left', anchor='w', wraplength=500)
-        resultado.pack(fill='x', padx=20, pady=15)
+        lbl_peso = tk.Label(dlg, text='Peso: — kg', bg=COR['verdeclaro'], fg=COR['verde2'], font=('Consolas', 16, 'bold'))
+        lbl_peso.pack(fill='x', padx=20, pady=(14, 4), ipady=6)
+        lbl_bruto = tk.Label(dlg, text='Bytes recebidos: (nenhum ainda)', bg=COR['branco'], fg=COR['cinza'],
+                             font=('Consolas', 8), anchor='w', justify='left', wraplength=560)
+        lbl_bruto.pack(fill='x', padx=20)
+        resultado = tk.Label(dlg, text='', bg=COR['branco'], fg=COR['cinza'], justify='left', anchor='w', wraplength=560)
+        resultado.pack(fill='x', padx=20, pady=(8, 0))
 
         def extrair_porta(texto):
             return texto.split(' — ', 1)[0].strip() if texto else ''
+
+        def _paridade_codigo():
+            for cod, nome in LeitorBalanca.PARIDADES.items():
+                if nome == var_par.get():
+                    return cod
+            return 'N'
+
+        def _mostrar_peso(peso):
+            try:
+                dlg.after(0, lambda: lbl_peso.config(text=f'Peso: {peso:.3f} kg'))
+            except tk.TclError:
+                pass
+
+        def _mostrar_bruto(dados):
+            def _upd():
+                try:
+                    legivel = (dados.decode('ascii', errors='replace')
+                               .replace('\x02', '<STX>').replace('\x03', '<ETX>').replace('\r', '<CR>'))
+                    hexa = ' '.join(f'{b:02X}' for b in dados[:24])
+                    lbl_bruto.config(text=f'Bytes: {hexa}\nTexto: {legivel[:80]}')
+                except tk.TclError:
+                    pass
+            try:
+                dlg.after(0, _upd)
+            except tk.TclError:
+                pass
 
         def testar():
             porta = extrair_porta(var_porta.get())
@@ -218,24 +274,29 @@ class App(GestaoMixin, tk.Tk):
                 resultado.config(text='Informe uma porta.', fg=COR['vermelho'])
                 return
             self.balanca.parar()
-            self.balanca = LeitorBalanca.criar_para_toledo_8217(porta, var_proto.get())
+            self.balanca = LeitorBalanca.criar_para_toledo_8217(
+                porta, var_proto.get(), callback_peso=_mostrar_peso,
+                baudrate=int(var_baud.get()), parity=_paridade_codigo(), callback_bruto=_mostrar_bruto)
             ok = self.balanca.iniciar()
             if ok:
-                resultado.config(text=f'✓ Conectada em {porta}. Aguardando peso da balança...', fg=COR['verde'])
+                resultado.config(text=f'✓ Conectada em {porta}. Coloque um peso na balança e aguarde aparecer acima.', fg=COR['verde'])
             else:
                 resultado.config(text=f'✗ Não conectou: {self.balanca.erro}', fg=COR['vermelho'])
 
         def salvar():
             porta = extrair_porta(var_porta.get())
-            salvar_config({'balanca_porta': porta, 'balanca_protocolo': var_proto.get()})
+            salvar_config({'balanca_porta': porta, 'balanca_protocolo': var_proto.get(),
+                           'balanca_baudrate': int(var_baud.get()), 'balanca_parity': _paridade_codigo()})
             dlg.destroy()
+            self._iniciar_balanca()
             self._toast('Configuração da balança salva')
 
-        botoes = tk.Frame(dlg)
-        botoes.pack(fill='x', padx=20, pady=5)
-        ttk.Button(botoes, text='Testar conexão', command=testar).pack(side='left')
-        ttk.Button(botoes, text='Salvar', command=salvar).pack(side='right')
-        ttk.Button(botoes, text='Cancelar', command=dlg.destroy).pack(side='right', padx=6)
+        botoes = tk.Frame(dlg, bg=COR['branco'])
+        botoes.pack(fill='x', padx=20, pady=(12, 16), side='bottom')
+        ttk.Button(botoes, text='Testar conexão', style='Secondary.TButton', command=testar).pack(side='left')
+        ttk.Button(botoes, text='Salvar', style='Primary.TButton', command=salvar).pack(side='right')
+        ttk.Button(botoes, text='Cancelar', style='Secondary.TButton',
+                   command=lambda: (dlg.destroy(), self._iniciar_balanca())).pack(side='right', padx=6)
 
     def _validar_nome(self, texto_proposto):
         return bool(re.fullmatch(r'[A-Za-zÀ-ÿ0-9 ]*', texto_proposto))

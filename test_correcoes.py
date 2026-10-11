@@ -94,6 +94,45 @@ class AutenticacaoTest(BaseTemp):
         self.assertTrue(g.autenticar('admin', 'novasenha1'))
 
 
+class BalancaTest(unittest.TestCase):
+    def test_protocolos_toledo_8217(self):
+        from balanca import LeitorBalanca as L
+        p = L._parsear_toledo_pacote
+        # P05A: 5 dígitos sem ponto (2 inteiros + 3 decimais)
+        self.assertEqual(p(b'\x02' + b'15000' + b'\x03'), 15.0)
+        self.assertEqual(p(b'\x02' + b'00500' + b'\x03'), 0.5)
+        # Instável / negativo / acima não viram peso
+        self.assertIsNone(p(b'\x02' + b'IIIII' + b'\x03'))
+        self.assertIsNone(p(b'\x02' + b'NNNNN' + b'\x03'))
+        self.assertIsNone(p(b'\x02' + b'SSSSS' + b'\x03'))
+        # P05B: S + PPDPPP (com ponto decimal)
+        self.assertEqual(p(b'\x02' + b' 00.185' + b'\x03'), 0.185)
+        self.assertEqual(p(b'\x02' + b'-00.185' + b'\x03'), -0.185)
+        # P05B com tara: usa o peso líquido (primeiro número)
+        self.assertEqual(p(b'\x02' + b' 00.185 01.000' + b'\x03'), 0.185)
+        # P06: 6 caracteres + CR
+        self.assertEqual(p(b'\x02' + b'00.185' + b'\r'), 0.185)
+
+    def test_frame_fragmentado(self):
+        from balanca import LeitorBalanca as L
+        b = L()
+        for parte in (b'\x02', b'15', b'000', b'\x03'):
+            b._processar_bytes(parte)
+        self.assertEqual(b.peso_atual(), 15.0)
+
+    def test_peso_negativo_nao_vira_saldo(self):
+        from balanca import LeitorBalanca as L
+        b = L()
+        b._processar_bytes(b'\x02' + b'-00.500' + b'\x03')
+        self.assertEqual(b.peso_atual(), 0.0)
+
+    def test_perfis_tem_baud_e_paridade(self):
+        from balanca import LeitorBalanca as L
+        self.assertEqual(L.PROTOCOLOS['P05A (Toledo 8217)']['baudrate'], 2400)
+        self.assertIn('P05B (Toledo 8217)', L.PROTOCOLOS)
+        self.assertIn('P06 (Toledo 8217)', L.PROTOCOLOS)
+
+
 class ArredondamentoTest(BaseTemp):
     def test_total_kg_bate_com_backend(self):
         g.abrir_caixa(0)

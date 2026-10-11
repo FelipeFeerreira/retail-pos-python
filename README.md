@@ -44,6 +44,22 @@ The application initializes its SQLite database on first run. On the first launc
 - **NF-e import:** the app never fabricates expiration dates or payment terms. When the invoice does not carry the due date, payment condition or the expiration of perishables, the preview asks for them explicitly and blocks the import until they are provided. Duplicate invoices are detected and ignored, and a failed import does not leave orphan product registrations.
 - **Single instance:** a cross-platform lock (Windows `msvcrt` / Unix `flock`) prevents two copies from opening the same SQLite file.
 
+## Balança Toledo 8217 (Prix)
+
+Configuração em **Arquivo → Configurar balança**. O app já fala os protocolos da 8217 (P05A, P05B, P05, P06).
+
+1. Na balança, programe o protocolo **P05A** (parâmetro `C09`) e escolha o **baud rate** (parâmetro `C10`; padrão de fábrica **2400**).
+2. No app, selecione a porta, o protocolo, o **mesmo baud rate** e a paridade (normalmente **Nenhuma**).
+3. Clique em **Testar conexão**: coloque um peso na balança e confira o "Peso: X kg" que aparece. Se não vier peso, o campo **Bytes recebidos** mostra o que está chegando (ajuda a achar baud/paridade corretos). Salve.
+
+Portas seriais:
+- **Windows:** `COM3`, `COM4`, ... (aparecem na lista automaticamente).
+- **Linux:** normalmente `/dev/ttyUSB0` (conversor USB) ou `/dev/ttyS0` (serial nativa). Se der erro de permissão, adicione o usuário ao grupo: `sudo usermod -aG dialout $USER` (relogar depois).
+
+O protocolo P05A manda o peso como 5 dígitos sem ponto (`15000` = 15,000 kg); P05B/P06 mandam com ponto (`00.185`). Pesos instáveis (`IIIII`), negativos (`NNNNN`) e de sobrecarga (`SSSSS`) são ignorados. A leitura roda em segundo plano e não trava o caixa; na tela de venda, ao adicionar um produto por KG, o peso da balança é usado automaticamente quando disponível.
+
+> A integração foi validada por testes automatizados do parser e do diálogo, mas **não foi verificada fisicamente** com a balança conectada — a conferência final depende do equipamento e do cabo.
+
 ## Verification
 
 ```bash

@@ -1,16 +1,24 @@
 """
 Integração com balanças Toledo para checkout.
 
-Perfil principal: Toledo 8217 (etiqueta do equipamento do projeto).
+Perfil principal: Toledo 8217 (linha Prix / checkout).
 
-A 8217 suporta protocolos P05/P05A/P06 e comunicação serial. Para P05A,
-o equipamento pode aguardar ENQ (ASCII 0x05) e responder com
-STX + 5 caracteres de peso + ETX. O peso é enviado sem ponto decimal,
-com os dois primeiros caracteres como parte inteira e os três últimos
-como parte decimal.
+Protocolos suportados pela 8217 (manual Toledo):
+  * P05A  -> ENQ -> [STX][PPPPP][ETX]; PPPPP = 5 dígitos sem ponto decimal
+             (2 primeiros = parte inteira, 3 últimos = decimais).
+  * P05B  -> ENQ -> [STX][S][PPDPPP][ETX]; S = espaço (positivo) ou '-' e
+             PPDPPP = 6 caracteres com ponto decimal (ex.: "00.185").
+  * P05   -> modo antigo, tratado como P05A (por demanda).
+  * P06   -> saída contínua [STX][PP.DDD][CR] (ex.: "00.185").
+  * Genérico -> tenta achar um peso em texto livre.
 
-Este módulo também mantém um modo genérico para balanças que enviam o
-peso continuamente.
+Comunicação serial: 8 bits de dados, sem paridade, 1 stop bit. A velocidade
+na 8217 é configurável (C10), com padrão de fábrica 2400 bauds — por isso o
+baud rate é ajustável na tela de configuração.
+
+Este módulo mantém um leitor em thread separada para não travar a interface
+Tkinter, e expõe os bytes crus recebidos (diagnóstico) para ajudar a achar a
+configuração certa quando a balança não responde.
 """
 
 from __future__ import annotations
@@ -28,36 +36,54 @@ except ImportError:
     list_ports = None
 
 
+# Modos: p05a/p05b/p05 -> enviam ENQ; p06/generic -> leitura contínua.
+PROTOCOLOS = {
+    "P05A (Toledo 8217)": {"baudrate": 2400, "parity": "N", "mode": "p05a"},
+    "P05B (Toledo 8217)": {"baudrate": 2400, "parity": "N", "mode": "p05b"},
+    "P05 (Toledo 8217)": {"baudrate": 2400, "parity": "N", "mode": "p05"},
+    "P06 (Toledo 8217)": {"baudrate": 9600, "parity": "N", "mode": "p06"},
+    "Genérico contínuo": {"baudrate": 9600, "parity": "N", "mode": "generic"},
+}
+
+BAUDRATES = [2400, 4800, 9600, 1200, 300]
+PARIDADES = {"N": "Nenhuma", "E": "Par", "O": "Ímpar"}
+
+
 class LeitorBalanca:
     """Leitor de balança Toledo/serial sem bloquear a interface Tkinter."""
 
-    PROTOCOLOS = {
-        "P05A (Toledo 8217)": {"baudrate": 9600, "parity": "N", "mode": "p05a"},
-        "P05 (Toledo 8217)": {"baudrate": 2400, "parity": "N", "mode": "p05"},
-        "P06 (Toledo 8217)": {"baudrate": 9600, "parity": "N", "mode": "p06"},
-        "Genérico contínuo": {"baudrate": 9600, "parity": "N", "mode": "generic"},
-    }
+    PROTOCOLOS = PROTOCOLOS
+    BAUDRATES = BAUDRATES
+    PARIDADES = PARIDADES
 
     def __init__(
         self,
         porta: Optional[str] = None,
-        baudrate: int = 9600,
+        baudrate: int = 2400,
         callback_peso: Optional[Callable[[float], None]] = None,
         protocolo: str = "P05A (Toledo 8217)",
         demanda: bool = True,
+        parity: str = "N",
+        callback_bruto: Optional[Callable[[bytes], None]] = None,
     ):
         self.porta = porta
         self.baudrate = int(baudrate)
+        self.parity = str(parity or "N").upper()[:1]
         self.callback_peso = callback_peso
+        self.callback_bruto = callback_bruto
         self.protocolo = protocolo
         self.demanda = demanda
+        cfg = PROTOCOLOS.get(protocolo, {})
+        self.mode = cfg.get("mode", "generic")
         self._serial = None
         self._thread = None
         self._parar = threading.Event()
         self._lock = threading.Lock()
         self._ultimo_peso = 0.0
         self._ultimo_recebimento = 0.0
+        self._ultimo_bruto = b""
         self._erro = None
+        self._buffer = b""
 
     @staticmethod
     def portas_disponiveis():
@@ -73,14 +99,18 @@ class LeitorBalanca:
         ]
 
     @classmethod
-    def criar_para_toledo_8217(cls, porta: str, protocolo="P05A (Toledo 8217)", callback_peso=None):
-        cfg = cls.PROTOCOLOS.get(protocolo, cls.PROTOCOLOS["P05A (Toledo 8217)"])
+    def criar_para_toledo_8217(cls, porta: str, protocolo="P05A (Toledo 8217)",
+                               callback_peso=None, baudrate=None, parity=None,
+                               callback_bruto=None):
+        cfg = PROTOCOLOS.get(protocolo, PROTOCOLOS["P05A (Toledo 8217)"])
         return cls(
             porta=porta,
-            baudrate=cfg["baudrate"],
+            baudrate=int(baudrate) if baudrate else cfg["baudrate"],
+            parity=(parity or cfg.get("parity", "N")),
             callback_peso=callback_peso,
+            callback_bruto=callback_bruto,
             protocolo=protocolo,
-            demanda=cfg["mode"] in ("p05a", "p05"),
+            demanda=cfg["mode"] in ("p05a", "p05b", "p05"),
         )
 
     @property
@@ -90,6 +120,11 @@ class LeitorBalanca:
     @property
     def erro(self):
         return self._erro
+
+    @property
+    def ultimo_bruto(self):
+        with self._lock:
+            return self._ultimo_bruto
 
     def peso_atual(self) -> float:
         with self._lock:
@@ -102,6 +137,7 @@ class LeitorBalanca:
     def iniciar(self):
         self.parar()
         self._erro = None
+        self._buffer = b""
         if serial is None:
             self._erro = "PySerial não está instalado. Rode: pip install pyserial"
             return False
@@ -109,17 +145,18 @@ class LeitorBalanca:
             self._erro = "Nenhuma porta COM foi selecionada."
             return False
 
-        cfg = self.PROTOCOLOS.get(self.protocolo, {})
-        baudrate = int(cfg.get("baudrate", self.baudrate))
-        mode = cfg.get("mode", "generic")
-        self.demanda = mode in ("p05a", "p05")
+        paridade = {
+            "N": serial.PARITY_NONE,
+            "E": serial.PARITY_EVEN,
+            "O": serial.PARITY_ODD,
+        }.get(self.parity, serial.PARITY_NONE)
 
         try:
             self._serial = serial.Serial(
                 port=self.porta,
-                baudrate=baudrate,
+                baudrate=self.baudrate,
                 bytesize=serial.EIGHTBITS,
-                parity=serial.PARITY_NONE,
+                parity=paridade,
                 stopbits=serial.STOPBITS_ONE,
                 timeout=0.12,
                 write_timeout=0.3,
@@ -147,7 +184,7 @@ class LeitorBalanca:
         self._serial = None
 
     def solicitar_peso(self):
-        """Envia ENQ para protocolos Toledo P05/P05A."""
+        """Envia ENQ para protocolos Toledo P05/P05A/P05B."""
         if not self.conectado:
             return False
         try:
@@ -174,19 +211,22 @@ class LeitorBalanca:
                 break
 
     def _processar_bytes(self, dados: bytes):
-        # P05/P05A: STX + 5 bytes + ETX. Pode chegar fragmentado em várias leituras.
-        if hasattr(self, "_buffer"):
-            self._buffer += dados
-        else:
-            self._buffer = dados
+        with self._lock:
+            self._ultimo_bruto = dados[-64:]
+        if self.callback_bruto:
+            try:
+                self.callback_bruto(dados)
+            except Exception:
+                pass
 
+        self._buffer += dados
         # Limita o buffer para não crescer em caso de protocolo incompatível.
         self._buffer = self._buffer[-256:]
 
         while True:
-            inicio = self._buffer.find(b"\x02")
+            inicio = self._buffer.find(b"\x02")  # STX
             if inicio < 0:
-                # P06/genérico pode não ter STX legível; tenta texto abaixo.
+                # Sem STX (ex.: texto livre) tenta extrair um peso da mensagem.
                 texto = self._buffer.decode("ascii", errors="ignore")
                 peso = self._extrair_peso(texto)
                 if peso is not None:
@@ -194,20 +234,16 @@ class LeitorBalanca:
                     self._buffer = b""
                 return
 
-            if len(self._buffer) < inicio + 7:
-                return
-
-            fim = self._buffer.find(b"\x03", inicio + 1)
+            # Procura o terminador ETX (03) ou CR (0d) a partir do STX.
+            fim = -1
+            for i in range(inicio + 1, len(self._buffer)):
+                if self._buffer[i] in (0x03, 0x0d):
+                    fim = i
+                    break
             if fim < 0:
-                # P06 pode usar CR como final.
-                cr = self._buffer.find(b"\x0d", inicio + 1)
-                if cr >= 0:
-                    pacote = self._buffer[inicio:cr + 1]
-                    self._buffer = self._buffer[cr + 1:]
-                    peso = self._parsear_toledo_pacote(pacote)
-                    if peso is not None:
-                        self._registrar_peso(peso)
-                    continue
+                # Pacote ainda incompleto; espera mais bytes.
+                if inicio > 0:
+                    self._buffer = self._buffer[inicio:]
                 return
 
             pacote = self._buffer[inicio:fim + 1]
@@ -220,18 +256,31 @@ class LeitorBalanca:
     def _parsear_toledo_pacote(pacote: bytes) -> Optional[float]:
         if len(pacote) < 4 or pacote[0] != 0x02:
             return None
-        corpo = pacote[1:-1].decode("ascii", errors="ignore").strip()
-        if not corpo:
+        corpo = pacote[1:]
+        if corpo and corpo[-1] in (0x03, 0x0d):
+            corpo = corpo[:-1]
+        texto = corpo.decode("ascii", errors="ignore")
+        return LeitorBalanca._interpretar_corpo(texto)
+
+    @staticmethod
+    def _interpretar_corpo(texto: str) -> Optional[float]:
+        t = texto.strip()
+        if not t:
             return None
-        if corpo[0] in ("I", "N", "S"):
-            return None  # instável, negativo ou acima da capacidade
-
-        # P05/P05A: 5 dígitos, dois inteiros + três decimais.
-        if re.fullmatch(r"\d{5}", corpo):
-            return int(corpo[:2]) + int(corpo[2:]) / 1000.0
-
-        # P06: permite 00.000 ou outras representações textuais.
-        return LeitorBalanca._extrair_peso(corpo)
+        # Instável / negativo / acima: corpo preenchido com a mesma letra.
+        if len(t) >= 3 and len(set(t)) == 1 and t[0] in ("I", "N", "S"):
+            return None
+        # P05A: 5 dígitos sem ponto decimal -> 2 inteiros + 3 decimais.
+        if re.fullmatch(r"\d{5}", t):
+            return int(t[:2]) + int(t[2:]) / 1000.0
+        # P05B / P06 (e "peso + tara"): número com ponto decimal.
+        m = re.search(r"[-+]?\d+\.\d+", texto)
+        if m:
+            try:
+                return float(m.group(0))
+            except ValueError:
+                return None
+        return LeitorBalanca._extrair_peso(texto)
 
     @staticmethod
     def _extrair_peso(texto: str) -> Optional[float]:

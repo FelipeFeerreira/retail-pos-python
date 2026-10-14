@@ -11,6 +11,25 @@ A desktop retail-management application built with **Python, Tkinter and SQLite*
 - Spreadsheet imports and reports, local backups, serial-scale and Windows receipt-printer integration.
 - First-run manager registration and regression tests that use temporary databases.
 
+## Duas interfaces (transição)
+
+- **Interface reformulada (nova) — `app_reformulado.py`**: navegação por áreas
+  (Início, Vendas, Produtos e estoque, Compras, Operacional, Financeiro,
+  Resultados, Diagnóstico, Administração), organizada em `reformulacao/`
+  (`tema`, `componentes`, `paginas`, `shell`). Usa o **mesmo banco e os mesmos
+  serviços**. É a entrada principal da nova versão.
+- **Interface antiga — `app.py`**: continua disponível durante a transição.
+
+As duas **não podem rodar juntas** no mesmo banco (a trava de instância única
+impede). O banco e as regras são os mesmos; migrações são compartilhadas.
+
+```bash
+# nova interface
+.venv/bin/python app_reformulado.py
+# interface antiga (transição)
+.venv/bin/python app.py
+```
+
 ## Run locally
 
 Requires Python 3.13 with Tkinter support. `pywin32` (Windows printer integration) is marked Windows-only in `requirements.txt`, so the same file installs cleanly on Linux/macOS too.
@@ -145,7 +164,8 @@ The regression suite redirects database operations to temporary files. The inter
 
 | Module | Responsibility |
 | --- | --- |
-| `app.py`, `gestao_ui.py` | Tkinter application and finance screens |
+| `app_reformulado.py`, `reformulacao/` | Nova interface (shell, páginas, componentes, tema) |
+| `app.py`, `gestao_ui.py` | Interface antiga (transição) e telas de gestão |
 | `database.py`, `schema.sql`, `gestao_schema.sql` | Persistence and schema initialization |
 | `operacoes.py`, `gestao.py` | Retail operations and finance rules |
 | `producao.py`, `validade.py` | Recipes, production and expiration batches |

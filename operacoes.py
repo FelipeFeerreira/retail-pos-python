@@ -426,8 +426,8 @@ GRUPOS_CONSUMO = g.GRUPOS_CONSUMO
 NOMES_GRUPO_CONSUMO = g.NOMES_GRUPO_CONSUMO
 
 
-def grupo_consumo(motivo):
-    return g.grupo_consumo(motivo)
+def grupo_consumo(motivo=None, finalidade=None):
+    return g.grupo_consumo(motivo, finalidade)
 
 def registrar_consumo_interno(itens,motivo='',observacao='',responsavel=None,centro_custo='',chave=None,finalidade=''):
     try:

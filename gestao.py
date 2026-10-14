@@ -1143,25 +1143,47 @@ def estornar_producao(producao_id,motivo):
         if mov:
             raise ErroGestao(f'Houve movimentação posterior ({mov["observacao"]}) deste produto. '
                              'Confira e regularize antes de reverter a produção.')
-        # 4) restaura o estado anterior EXATO (snapshot), não o custo atual
-        c.execute('UPDATE produtos SET quantidade_estoque=?,preco_custo=? WHERE id=?',
-                  (pr['estoque_anterior_produto'],pr['custo_anterior_produto'],pf))
+        # 4) produto acabado: reversão compensatória. Sem uso posterior (checado
+        #    acima), o saldo atual é o do pós-produção; retira-se a quantidade
+        #    produzida valorizada pelo custo unitário da produção. Se houver
+        #    snapshot, usa o estado anterior exato (mais preciso).
+        atual=c.execute('SELECT quantidade_estoque,preco_custo FROM produtos WHERE id=?',(pf,)).fetchone()
+        qtd_prod=float(pr['quantidade_produzida'] or 0)
+        custo_prod=float(pr['custo_unitario'] or 0)
+        if pr['estoque_anterior_produto'] is not None and pr['custo_anterior_produto'] is not None:
+            c.execute('UPDATE produtos SET quantidade_estoque=?,preco_custo=? WHERE id=?',
+                      (pr['estoque_anterior_produto'],pr['custo_anterior_produto'],pf))
+        else:
+            # produção antiga sem snapshot: reversão compensatória (não inventa)
+            saldo_ant=float(atual['quantidade_estoque'] or 0)
+            qtd_final=round(saldo_ant-qtd_prod,3)
+            custo_final=((saldo_ant*float(atual['preco_custo'] or 0)-qtd_prod*custo_prod)/(saldo_ant-qtd_prod)
+                         if saldo_ant-qtd_prod>0.00001 else float(atual['preco_custo'] or 0))
+            c.execute('UPDATE produtos SET quantidade_estoque=?,preco_custo=? WHERE id=?',(qtd_final,custo_final,pf))
         c.execute("INSERT INTO movimentacoes_estoque(produto_id,tipo,quantidade,observacao) VALUES(?,'saida',?,?)",
-                  (pf,pr['quantidade_produzida'],f'Estorno produção #{producao_id}: {motivo}'))
+                  (pf,qtd_prod,f'Estorno produção #{producao_id}: {motivo}'))
         lote=c.execute("SELECT id FROM lotes_validade WHERE produto_id=? AND observacao=?",
                        (pf,f'Produção #{producao_id}')).fetchone()
         if lote:
             c.execute('DELETE FROM lotes_validade WHERE id=?',(lote['id'],))
-        for it in c.execute('SELECT * FROM insumos_producao WHERE producao_id=?',(producao_id,)).fetchall():
-            est_ant=it['estoque_anterior_insumo']
-            cust_ant=it['custo_anterior_insumo']
-            if est_ant is None:
-                # produção antiga sem snapshot: devolve só a quantidade
-                c.execute('UPDATE produtos SET quantidade_estoque=round(quantidade_estoque+?,3) WHERE id=?',(it['quantidade'],it['produto_id']))
-            else:
-                c.execute('UPDATE produtos SET quantidade_estoque=?,preco_custo=? WHERE id=?',(est_ant,cust_ant,it['produto_id']))
+        # 5) insumos: reversão COMPENSATÓRIA. Devolve a quantidade ao estado
+        #    ATUAL (preservando compras/vendas/consumos posteriores) e recompõe
+        #    o custo médio com as unidades retornadas pelo custo histórico da
+        #    produção (insumos_producao.custo_unitario). NUNCA sobrescreve o
+        #    saldo/custo atual. Sem custo histórico → bloqueia (não inventa).
+        insumos=c.execute('SELECT * FROM insumos_producao WHERE producao_id=?',(producao_id,)).fetchall()
+        for it in insumos:
+            if it['custo_unitario'] is None:
+                raise ErroGestao(f"Produção sem custo histórico do insumo {it['nome']}: "
+                                 'não é possível reverter com segurança — registre um ajuste compensatório.')
+        for it in insumos:
+            atual=c.execute('SELECT quantidade_estoque,preco_custo FROM produtos WHERE id=?',(it['produto_id'],)).fetchone()
+            q=float(it['quantidade'] or 0); c_hist=float(it['custo_unitario'] or 0)
+            novo=custo_medio_entrada(atual['quantidade_estoque'],atual['preco_custo'],q,c_hist)
+            c.execute('UPDATE produtos SET quantidade_estoque=round(quantidade_estoque+?,3),preco_custo=? WHERE id=?',
+                      (q,novo,it['produto_id']))
             c.execute("INSERT INTO movimentacoes_estoque(produto_id,tipo,quantidade,observacao) VALUES(?,'entrada',?,?)",
-                      (it['produto_id'],it['quantidade'],f'Estorno produção #{producao_id}: {motivo}'))
+                      (it['produto_id'],q,f'Estorno produção #{producao_id}: {motivo}'))
         for l in c.execute("SELECT lote_id,quantidade FROM baixas_lotes WHERE origem='Produção' AND referencia=?",(str(producao_id),)).fetchall():
             c.execute('UPDATE lotes_validade SET quantidade=round(quantidade+?,3) WHERE id=?',(l['quantidade'],l['lote_id']))
         c.execute('UPDATE producoes SET estornado=1 WHERE id=?',(producao_id,))

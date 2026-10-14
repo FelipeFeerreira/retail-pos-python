@@ -535,17 +535,40 @@ class DefeitosReformulacaoTest(BaseTemp):
             self.assertAlmostEqual(sum(d['valor'] for d in det), r[chave], 2,
                                    msg=f'componente {comp}: detalhe != total')
 
-    def test_estorno_producao_restaura_custo_anterior(self):
-        insumo = op.criar_produto('INS-EST', preco_custo=2, preco_venda=3, quantidade_estoque=100)
-        final = op.criar_produto('FIM-EST', preco_custo=5, preco_venda=10, quantidade_estoque=20)
+    def test_estorno_producao_preserva_movimentacoes_posteriores(self):
+        # Produzir -> comprar mais insumo (outro custo) -> consumir -> estornar.
+        insumo = op.criar_produto('INS-POST', preco_custo=2, preco_venda=3, quantidade_estoque=100)
+        final = op.criar_produto('FIM-POST', preco_custo=0, preco_venda=10, quantidade_estoque=0)
         rid = prod.criar_receita(final, rendimento=10, itens=[{'insumo_id': insumo, 'quantidade': 10}])
         pr = g.registrar_producao(rid, 1, validade=(date.today() + timedelta(days=30)).isoformat())
-        op.atualizar_produto(insumo, preco_custo=4)  # custo do insumo muda depois
+        # compra posterior (20 x 5) e consumo posterior (30)
+        g.receber_compra([{'produto_id': insumo, 'quantidade': 20, 'custo': 5.0}], 'Forn', 'DOC-POST',
+                         (date.today() + timedelta(days=30)).isoformat())
+        op.registrar_consumo_interno([{'produto_id': insumo, 'quantidade': 30}], 'Limpeza', finalidade='operacional')
+        # estado antes do estorno: qtd 80, custo (90*2+20*5)/110
+        custo_meio = (90 * 2 + 20 * 5) / 110
+        self.assertAlmostEqual(op.obter_produto(insumo)['quantidade_estoque'], 80, 3)
         g.estornar_producao(pr['id'], 'engano')
-        self.assertEqual(op.obter_produto(final)['quantidade_estoque'], 20)
-        self.assertEqual(op.obter_produto(final)['preco_custo'], 5)   # snapshot, não o custo atual
-        self.assertEqual(op.obter_produto(insumo)['quantidade_estoque'], 100)
-        self.assertEqual(op.obter_produto(insumo)['preco_custo'], 2)  # restaurado ao anterior
+        p = op.obter_produto(insumo)
+        # todas as movimentações posteriores preservadas: 100 -10 +20 -30 +10 = 90
+        self.assertAlmostEqual(p['quantidade_estoque'], 90, 3)
+        # valorização compensatória: devolve 10 pelo custo histórico (2)
+        self.assertAlmostEqual(p['preco_custo'], (80 * custo_meio + 10 * 2) / 90, 4)
+        self.assertAlmostEqual(op.obter_produto(final)['quantidade_estoque'], 0, 3)
+
+    def test_estorno_producao_antiga_sem_snapshot(self):
+        # Produção antiga sem as colunas de snapshot: reverte compensatoriamente
+        # (usa o custo histórico gravado), sem inventar estado anterior.
+        insumo = op.criar_produto('INS-OLD', preco_custo=2, preco_venda=3, quantidade_estoque=100)
+        final = op.criar_produto('FIM-OLD', preco_custo=0, preco_venda=10, quantidade_estoque=0)
+        rid = prod.criar_receita(final, rendimento=10, itens=[{'insumo_id': insumo, 'quantidade': 10}])
+        pr = g.registrar_producao(rid, 1, validade=(date.today() + timedelta(days=30)).isoformat())
+        with g.transacao() as c:
+            c.execute('UPDATE producoes SET estoque_anterior_produto=NULL,custo_anterior_produto=NULL WHERE id=?', (pr['id'],))
+            c.execute('UPDATE insumos_producao SET estoque_anterior_insumo=NULL,custo_anterior_insumo=NULL WHERE producao_id=?', (pr['id'],))
+        g.estornar_producao(pr['id'], 'produção antiga')
+        self.assertAlmostEqual(op.obter_produto(final)['quantidade_estoque'], 0, 3)
+        self.assertAlmostEqual(op.obter_produto(insumo)['quantidade_estoque'], 100, 3)
 
     def test_estorno_producao_bloqueia_ajuste_posterior(self):
         insumo = op.criar_produto('INS-AJ', preco_custo=2, preco_venda=3, quantidade_estoque=100)

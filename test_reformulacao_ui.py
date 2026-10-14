@@ -75,8 +75,19 @@ def main():
         det = g.lancamentos_componente('consumo_operacional', hoje, hoje)
         assert round(sum(d['valor'] for d in det), 2) == res['consumo_operacional'] == 6.0, 'detalhe != total'
 
+        # Resolução comum 1366x768: o CONTEÚDO de cada página precisa caber
+        # (a janela em si o WM controla; o que importa é não cortar campos/botões).
+        mw, mh = root.minsize()
+        assert mw <= 1366 and mh <= 768, f'minsize {mw}x{mh} maior que 1366x768'
+        for nome in ('Início', 'Vendas', 'Clientes', 'Produtos e estoque', 'Compras',
+                     'Operacional', 'Financeiro', 'Resultados', 'Diagnóstico', 'Administração'):
+            root.ir_para(nome)
+            root.update_idletasks()
+            assert root.winfo_reqwidth() <= 1366, f'{nome}: conteúdo pede largura {root.winfo_reqwidth()} > 1366'
+            assert root.winfo_reqheight() <= 768, f'{nome}: conteúdo pede altura {root.winfo_reqheight()} > 768'
+
         root.destroy()
-        print('OK: jornada da nova interface (consumo) com efeitos conferidos no banco.')
+        print('OK: jornada da nova interface (consumo) com efeitos conferidos no banco; 1366x768 ok.')
 
 
 if __name__ == '__main__':

@@ -278,6 +278,15 @@ def salvar_config(chave, valor):
         auditar(c, 'configurar', 'config', chave, {'valor': valor})
 
 
+def politica_cliente_simples(cliente_id):
+    """Política efetiva do cliente (abre a própria conexão). Para uso na UI."""
+    c = db.get_conn()
+    try:
+        return politica_cliente(c, cliente_id)
+    finally:
+        c.close()
+
+
 def politica_cliente(c, cliente_id):
     r = c.execute('SELECT * FROM clientes WHERE id=? AND ativo=1', (cliente_id,)).fetchone()
     if not r:
@@ -1066,6 +1075,18 @@ def estornar_pagamento(pid,motivo):
         estornar_movimento(c,p['movimento_id'],motivo)
         c.execute('UPDATE pagamentos_contas SET estornado=1 WHERE id=?',(pid,))
         auditar(c,'estornar','pagamento',pid,{'motivo':motivo})
+
+
+def classificar_consumo(consumo_id,finalidade):
+    """Classificação assistida: define a finalidade de um consumo antigo sem
+    classificação. Auditado; não altera quantidade, custo nem histórico."""
+    permitir('estoque')
+    if finalidade not in FINALIDADES_CONSUMO: raise ErroGestao('Finalidade inválida.')
+    with transacao() as c:
+        r=c.execute('SELECT * FROM consumo_interno WHERE id=?',(consumo_id,)).fetchone()
+        if not r: raise ErroGestao('Consumo não encontrado.')
+        c.execute('UPDATE consumo_interno SET finalidade=? WHERE id=?',(finalidade,consumo_id))
+        auditar(c,'classificar','consumo_interno',consumo_id,{'de':r['finalidade'],'para':finalidade})
 
 
 def estornar_baixa(baixa_id,motivo,perda=False):

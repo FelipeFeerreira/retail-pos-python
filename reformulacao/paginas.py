@@ -227,12 +227,14 @@ class OperacionalPage(PaginaBase):
         self.aba_consumo = ConsumoAba(nb, self.shell)
         self.aba_perda = PerdaAba(nb, self.shell)
         self.aba_prod = ProducaoAba(nb, self.shell)
+        self.aba_receitas = ReceitasAba(nb, self.shell)
         nb.add(self.aba_consumo, text=' Consumo interno / retiradas ')
         nb.add(self.aba_perda, text=' Perdas ')
         nb.add(self.aba_prod, text=' Produção ')
+        nb.add(self.aba_receitas, text=' Receitas ')
 
     def recarregar(self):
-        for aba in (self.aba_consumo, self.aba_perda, self.aba_prod):
+        for aba in (self.aba_consumo, self.aba_perda, self.aba_prod, self.aba_receitas):
             aba.recarregar()
 
 
@@ -548,6 +550,232 @@ class ProducaoAba(tk.Frame):
             self.hist.insert('', 'end', iid=str(pr['id']), tags=(tag,),
                              values=(pr['data_hora'], pr['produto_nome'] + ('  ESTORNADA' if est else ''),
                                      tema.formatq(pr['quantidade_produzida'], pr['unidade']), tema.moeda(pr['custo_total'])))
+
+
+class ReceitasAba(tk.Frame):
+    """Cadastro/edição de receitas com seleção explícita de insumos."""
+
+    def __init__(self, master, shell):
+        super().__init__(master, bg=_C()['branco'])
+        self.shell = shell
+        cab = tk.Frame(self, bg=_C()['branco']); cab.pack(fill='x', padx=12, pady=10)
+        tk.Label(cab, text='Receitas', bg=_C()['branco'], fg=_C()['verde2'], font=(_F(), 13, 'bold')).pack(side='left')
+        ttk.Button(cab, text='Nova receita', style='Primary.TButton', command=lambda: _FormReceita(self, None, self.recarregar)).pack(side='right', padx=4)
+        ttk.Button(cab, text='Editar', style='Secondary.TButton', command=self._editar).pack(side='right', padx=4)
+        ttk.Button(cab, text='Desativar', style='Secondary.TButton', command=self._desativar).pack(side='right', padx=4)
+        self.tv = cp.tabela(self, [('produto', 'Produto final', 220, 'w'), ('rend', 'Rendimento', 110, 'e'),
+                                   ('insumos', 'Insumos', 420, 'w')], altura=14)
+        self.tv.pack(fill='both', expand=True, padx=12, pady=(0, 12))
+        self._cache = {}
+
+    def recarregar(self):
+        self._cache = {}; self.tv.delete(*self.tv.get_children())
+        for i, r in enumerate(prod.listar_receitas(somente_ativas=False)):
+            self._cache[r['id']] = r
+            insumos = ', '.join(f"{it['quantidade']:g} {it['nome']}" for it in r['itens'])
+            tag = 'par' if r['ativo'] else 'ruim'
+            self.tv.insert('', 'end', iid=str(r['id']), tags=(tag,),
+                           values=(r['nome'] + ('' if r['ativo'] else '  (inativa)'), tema.formatq(r['rendimento'], r['unidade']), insumos))
+
+    def _sel(self):
+        s = self.tv.selection()
+        return self._cache.get(int(s[0])) if s else None
+
+    def _editar(self):
+        r = self._sel()
+        if r:
+            _FormReceita(self, r, self.recarregar)
+
+    def _desativar(self):
+        r = self._sel()
+        if not r:
+            return
+        if messagebox.askyesno('Desativar receita', f'Desativar a receita de {r["nome"]}?'):
+            prod.desativar_receita(r['id']); self.recarregar(); self.shell.notificar('Receita desativada.')
+
+
+class _FormReceita(tk.Toplevel):
+    def __init__(self, master, receita, ao_salvar):
+        super().__init__(master)
+        self.receita = receita; self.ao_salvar = ao_salvar
+        self.title('Editar receita' if receita else 'Nova receita'); self.geometry('620x620'); self.transient(master)
+        self.configure(bg=_C()['branco'])
+        tk.Label(self, text='PRODUTO FINAL', bg=_C()['branco'], fg=_C()['cinza'], font=(_F(), 8, 'bold')).pack(anchor='w', padx=16, pady=(14, 2))
+        self.busca_final = cp.BuscaProduto(self)
+        self.busca_final.pack(fill='x', padx=16)
+        self.final = {'id': receita['produto_id'] if receita else None, 'nome': receita['nome'] if receita else None}
+        if receita:
+            self.busca_final.ent.insert(0, cp.rotulo_produto(receita))
+            self.busca_final.ent.config(state='disabled')
+        else:
+            self.busca_final.ao_selecionar = lambda p: self.final.update(id=p['id'], nome=p['nome'])
+        self.e_rend = cp.campo(self, 'RENDIMENTO (unidades que a receita rende)', receita['rendimento'] if receita else '1')
+        tk.Label(self, text='INSUMOS (selecione cada um na lista)', bg=_C()['branco'], fg=_C()['cinza'], font=(_F(), 8, 'bold')).pack(anchor='w', padx=16, pady=(10, 2))
+        self.frame = tk.Frame(self, bg=_C()['branco']); self.frame.pack(fill='both', expand=True, padx=16)
+        self.rows = []
+        if receita:
+            for it in receita['itens']:
+                self._add_row(it)
+        else:
+            self._add_row(None)
+        ttk.Button(self, text='+ Insumo', style='Secondary.TButton', command=lambda: self._add_row(None)).pack(anchor='w', padx=16, pady=6)
+        ttk.Button(self, text='Salvar receita', style='Primary.TButton', command=self._salvar).pack(fill='x', padx=16, pady=12)
+
+    def _add_row(self, item):
+        cont = tk.Frame(self.frame, bg=_C()['branco']); cont.pack(fill='x', pady=2)
+        busca = cp.BuscaProduto(cont, largura=30); busca.pack(side='left', fill='x', expand=True)
+        e_qtd = tk.Entry(cont, width=8, font=(_F(), 10)); e_qtd.pack(side='left', padx=6)
+        est = {'id': item['insumo_id'] if item else None, 'nome': item['nome'] if item else None}
+        if item:
+            busca.ent.insert(0, f"{item['nome']} ({item.get('unidade','UN')})"); e_qtd.insert(0, str(item['quantidade']))
+        busca.ao_selecionar = lambda p, s=est, b=busca: (s.update(id=p['id'], nome=p['nome']), b.ent.delete(0, 'end'), b.ent.insert(0, cp.rotulo_produto(p)))
+        def remover():
+            cont.destroy(); self.rows.remove(reg)
+        ttk.Button(cont, text='✕', width=3, style='Secondary.TButton', command=remover).pack(side='left')
+        reg = {'est': est, 'busca': busca, 'qtd': e_qtd}; self.rows.append(reg)
+
+    def _salvar(self):
+        fid = self.final.get('id')
+        if not fid:
+            messagebox.showerror('Produto final', 'Selecione o produto final.', parent=self); return
+        itens = []
+        for reg in self.rows:
+            if not reg['est'].get('id'):
+                continue
+            q = cp.parse_float(reg['qtd'].get(), 0)
+            if q <= 0:
+                messagebox.showerror('Insumo', 'Quantidade de insumo inválida.', parent=self); return
+            itens.append({'insumo_id': reg['est']['id'], 'quantidade': q})
+        if not itens:
+            messagebox.showerror('Insumos', 'Adicione ao menos um insumo.', parent=self); return
+        rend = cp.parse_float(self.e_rend.get(), 0)
+        try:
+            if self.receita:
+                prod.atualizar_receita(self.receita['id'], rend, itens)
+            else:
+                prod.criar_receita(fid, rend, itens)
+        except Exception as exc:
+            messagebox.showerror('Erro ao salvar', str(exc), parent=self); return
+        self.destroy(); self.ao_salvar()
+
+
+# ---------------------------------------------------------------------------
+# CLIENTES E FIADO
+# ---------------------------------------------------------------------------
+class ClientesPage(PaginaBase):
+    titulo = 'Clientes'
+
+    def _montar(self):
+        C = _C()
+        cab = self._cabecalho('Clientes e fiado')
+        ttk.Button(cab, text='Novo cliente', style='Primary.TButton', command=lambda: self._form(self._sel())).pack(side='right', padx=4)
+        ttk.Button(cab, text='Receber fiado', style='Secondary.TButton', command=self._receber).pack(side='right', padx=4)
+        ttk.Button(cab, text='Política de crédito', style='Secondary.TButton', command=self._politica).pack(side='right', padx=4)
+        ttk.Button(cab, text='Extrato', style='Secondary.TButton', command=self._extrato).pack(side='right', padx=4)
+        barra = tk.Frame(self, bg=C['papel']); barra.pack(fill='x', pady=(0, 6))
+        self.busca = tk.Entry(barra, font=(_F(), 11), width=40); self.busca.pack(side='left')
+        self.busca.bind('<KeyRelease>', lambda e: self.recarregar())
+        self.tv = cp.tabela(self, [('nome', 'Cliente', 260, 'w'), ('tel', 'Telefone', 140, 'w'),
+                                   ('saldo', 'Saldo fiado', 130, 'e'), ('limite', 'Limite', 110, 'e')], altura=18)
+        self.tv.pack(fill='both', expand=True)
+        self.tv.bind('<Double-1>', lambda e: self._extrato())
+        self._cache = {}
+
+    def recarregar(self):
+        termo = self.busca.get().strip()
+        clientes = op.listar_clientes(termo) if termo else op.listar_clientes()
+        self._cache = {}; self.tv.delete(*self.tv.get_children())
+        for i, c in enumerate(clientes):
+            self._cache[c['id']] = c
+            pol = g.politica_cliente_simples(c['id'])
+            tag = 'ruim' if c['saldo_fiado'] > 0 else ('par' if i % 2 == 0 else 'impar')
+            self.tv.insert('', 'end', iid=str(c['id']), tags=(tag,), values=(
+                c['nome'], c.get('telefone') or '', tema.moeda(c['saldo_fiado']),
+                tema.moeda(pol['limite_credito']) if pol and pol.get('limite_credito') is not None else '—'))
+
+    def _sel(self):
+        s = self.tv.selection()
+        return self._cache.get(int(s[0])) if s else None
+
+    def _form(self, cliente):
+        dlg = tk.Toplevel(self); dlg.title('Editar cliente' if cliente else 'Novo cliente')
+        dlg.geometry('420x420'); dlg.transient(self); dlg.configure(bg=_C()['branco'])
+        e_nome = cp.campo(dlg, 'NOME', cliente['nome'] if cliente else '')
+        e_tel = cp.campo(dlg, 'TELEFONE', cliente.get('telefone') if cliente else '')
+        e_doc = cp.campo(dlg, 'DOCUMENTO', cliente.get('documento') if cliente else '')
+        e_end = cp.campo(dlg, 'ENDEREÇO', cliente.get('endereco') if cliente else '')
+        e_obs = cp.campo(dlg, 'OBSERVAÇÃO', cliente.get('observacao') if cliente else '')
+
+        def salvar():
+            try:
+                if cliente:
+                    op.atualizar_cliente(cliente['id'], e_nome.get().strip(), e_tel.get().strip(), e_obs.get().strip(), cliente.get('documento_tipo') or '', e_doc.get().strip(), e_end.get().strip())
+                else:
+                    op.criar_cliente(e_nome.get().strip(), e_tel.get().strip(), e_obs.get().strip(), '', e_doc.get().strip(), e_end.get().strip())
+            except Exception as exc:
+                messagebox.showerror('Erro ao salvar', str(exc), parent=dlg); return
+            dlg.destroy(); self.recarregar(); self.shell.notificar('Cliente salvo.')
+        ttk.Button(dlg, text='Salvar', style='Primary.TButton', command=salvar).pack(fill='x', padx=20, pady=16)
+
+    def _extrato(self):
+        c = self._sel()
+        if not c:
+            return
+        eventos = op.extrato_cliente(c['id'])
+        dlg = tk.Toplevel(self); dlg.title(f"Extrato — {c['nome']}"); dlg.geometry('720x560'); dlg.transient(self)
+        tk.Label(dlg, text=f"{c['nome']}  ·  saldo {tema.moeda(op.saldo_fiado(c['id']))}", font=(_F(), 12, 'bold')).pack(anchor='w', padx=14, pady=10)
+        tv = cp.tabela(dlg, [('data', 'Data', 150, 'w'), ('tipo', 'Tipo', 120, 'w'),
+                             ('desc', 'Descrição', 330, 'w'), ('valor', 'Valor', 100, 'e')], altura=18)
+        for i, ev in enumerate(eventos):
+            if ev['tipo'] == 'compra':
+                desc = ', '.join(f"{it['nome']} x{it['quantidade']:g}" for it in ev['itens'])[:80]
+                tipo = 'Compra' + (' (fiado)' if ev['forma_pagamento'] == 'fiado' else '') + (' CANCELADA' if ev.get('cancelada') else '')
+            else:
+                desc = ev.get('observacao') or ''; tipo = 'Pagamento'
+            tv.insert('', 'end', tags=('ruim' if ev.get('cancelada') else ('par' if i % 2 == 0 else 'impar'),),
+                      values=(ev['data_hora'], tipo, desc, tema.moeda(ev['valor'])))
+        tv.pack(fill='both', expand=True, padx=14, pady=(0, 14))
+
+    def _receber(self):
+        c = self._sel()
+        if not c:
+            return
+        saldo = op.saldo_fiado(c['id'])
+        if saldo <= 0:
+            messagebox.showinfo('Fiado', 'Este cliente não tem saldo em aberto.'); return
+        dlg = tk.Toplevel(self); dlg.title(f"Receber fiado — {c['nome']}"); dlg.geometry('400x340'); dlg.transient(self)
+        tk.Label(dlg, text=f"Saldo: {tema.moeda(saldo)}", font=(_F(), 11, 'bold')).pack(anchor='w', padx=20, pady=12)
+        e_valor = cp.campo(dlg, 'VALOR RECEBIDO (R$)', saldo)
+        v_forma = cp.combo(dlg, 'FORMA', op.FORMAS_PAGAMENTO_FIADO)
+        e_obs = cp.campo(dlg, 'OBSERVAÇÃO', '')
+
+        def salvar():
+            try:
+                op.registrar_pagamento_fiado(c['id'], cp.parse_float(e_valor.get(), 0), e_obs.get().strip(), v_forma.get())
+            except Exception as exc:
+                messagebox.showerror('Erro ao salvar', str(exc), parent=dlg); return
+            dlg.destroy(); self.recarregar(); self.shell.atualizar_inicio(); self.shell.notificar('Recebimento registrado (não é nova venda).')
+        ttk.Button(dlg, text='Receber', style='Primary.TButton', command=salvar).pack(fill='x', padx=20, pady=16)
+
+    def _politica(self):
+        c = self._sel()
+        if not c:
+            return
+        p = g.politica_cliente_simples(c['id']) or {}
+        dlg = tk.Toplevel(self); dlg.title(f"Política — {c['nome']}"); dlg.geometry('400x420'); dlg.transient(self)
+        e_lim = cp.campo(dlg, 'LIMITE DE CRÉDITO (R$)', p.get('limite_credito', 200))
+        e_prazo = cp.campo(dlg, 'PRAZO (dias)', p.get('prazo_dias', 15))
+        e_juros = cp.campo(dlg, 'JUROS POR DIA (%)', p.get('juros_dia', 1))
+        e_multa = cp.campo(dlg, 'MULTA POR DIA (%)', p.get('multa_dia', 1))
+
+        def salvar():
+            try:
+                g.salvar_politica(c['id'], cp.parse_float(e_lim.get(), 0), int(cp.parse_float(e_prazo.get(), 0)),
+                                  cp.parse_float(e_juros.get(), 0), cp.parse_float(e_multa.get(), 0))
+            except Exception as exc:
+                messagebox.showerror('Erro ao salvar', str(exc), parent=dlg); return
+            dlg.destroy(); self.recarregar(); self.shell.notificar('Política de crédito salva.')
+        ttk.Button(dlg, text='Salvar', style='Primary.TButton', command=salvar).pack(fill='x', padx=20, pady=16)
 
 
 # ---------------------------------------------------------------------------
@@ -877,10 +1105,42 @@ class DiagnosticoPage(PaginaBase):
         self.tv.pack(fill='both', expand=True, pady=(0, 8))
         barra = tk.Frame(self, bg=C['papel']); barra.pack(fill='x')
         ttk.Button(barra, text='Abrir produtos para conferir', style='Secondary.TButton', command=self._abrir_produtos).pack(side='left')
+        ttk.Button(barra, text='Classificar consumo pendente', style='Secondary.TButton', command=self._classificar).pack(side='left', padx=6)
         ttk.Button(barra, text='Atualizar', style='Secondary.TButton', command=self.recarregar).pack(side='left', padx=6)
         self.lista_neg = cp.tabela(self, [('nome', 'Produto (estoque negativo)', 300, 'w'),
                                           ('estoque', 'Estoque', 120, 'e')], altura=8)
         self.lista_neg.pack(fill='both', expand=True)
+        self.lista_neg.bind('<Double-1>', lambda e: self._abrir_produto_neg())
+
+    def _abrir_produto_neg(self):
+        s = self.lista_neg.selection()
+        if s:
+            self.shell.ir_para('Produtos e estoque')
+
+    def _classificar(self):
+        pend = g.consultar("SELECT id,data_hora,motivo,valor_total FROM consumo_interno WHERE estornado=0 AND (finalidade IS NULL OR finalidade='') ORDER BY data_hora")
+        if not pend:
+            messagebox.showinfo('Classificar', 'Nenhum consumo pendente de classificação.'); return
+        dlg = tk.Toplevel(self); dlg.title('Classificar consumo'); dlg.geometry('640x480'); dlg.transient(self)
+        tk.Label(dlg, text='Defina a finalidade de cada consumo (auditado; não altera valores):', font=(_F(), 10)).pack(anchor='w', padx=14, pady=10)
+        tv = cp.tabela(dlg, [('data', 'Data', 150, 'w'), ('motivo', 'Motivo', 220, 'w'), ('valor', 'Valor', 100, 'e')], altura=12)
+        for i, r in enumerate(pend):
+            tv.insert('', 'end', iid=str(r['id']), tags=('par' if i % 2 == 0 else 'impar',),
+                      values=(r['data_hora'], r['motivo'] or '—', tema.moeda(r['valor_total'])))
+        tv.pack(fill='both', expand=True, padx=14)
+        rot = {'Operacional': 'operacional', 'Equipe': 'equipe', 'Pessoal/família': 'pessoal', 'Outro': 'outro'}
+        v_fin = cp.combo(dlg, 'FINALIDADE', list(rot))
+
+        def aplicar():
+            s = tv.selection()
+            if not s:
+                return
+            try:
+                g.classificar_consumo(int(s[0]), rot[v_fin.get()])
+            except Exception as exc:
+                messagebox.showerror('Erro', str(exc), parent=dlg); return
+            tv.delete(s[0]); self.recarregar(); self.shell.atualizar_inicio(); self.shell.notificar('Consumo classificado.')
+        ttk.Button(dlg, text='Aplicar no selecionado', style='Primary.TButton', command=aplicar).pack(pady=12)
 
     def recarregar(self):
         self.tv.delete(*self.tv.get_children())
@@ -901,59 +1161,284 @@ class DiagnosticoPage(PaginaBase):
 class VendasPage(PaginaBase):
     titulo = 'Vendas'
 
+    FORMAS = ['dinheiro', 'pix', 'cartao_debito', 'cartao_credito', 'voucher', 'fiado']
+
     def _montar(self):
         C = _C()
-        self._cabecalho('Vendas')
+        cab = tk.Frame(self, bg=C['papel']); cab.pack(fill='x', pady=(0, 8))
+        tk.Label(cab, text='Vendas (PDV)', bg=C['papel'], fg=C['verde2'], font=(_F(), 20, 'bold')).pack(side='left')
+        ttk.Button(cab, text='Cancelar venda', style='Secondary.TButton', command=self._cancelar).pack(side='right', padx=4)
+        ttk.Button(cab, text='Fechar caixa', style='Secondary.TButton', command=self._fechar_caixa).pack(side='right', padx=4)
+        ttk.Button(cab, text='Abrir caixa', style='Secondary.TButton', command=self._abrir_caixa).pack(side='right', padx=4)
+        self.lbl_caixa = tk.Label(cab, text='', bg=C['papel'], font=(_F(), 9, 'bold'))
+        self.lbl_caixa.pack(side='right', padx=10)
+
         corpo = tk.Frame(self, bg=C['papel']); corpo.pack(fill='both', expand=True)
         esq = tk.Frame(corpo, bg=C['branco']); esq.pack(side='left', fill='both', expand=True)
         dir_ = tk.Frame(corpo, bg=C['branco']); dir_.pack(side='left', fill='both', expand=True, padx=(10, 0))
-        self.busca = cp.BuscaProduto(esq); self.busca.pack(fill='x', padx=10, pady=(10, 6))
         self.carrinho = []
-        self.tv = cp.tabela(esq, [('nome', 'Produto', 220, 'w'), ('qtd', 'Qtd', 70, 'e'), ('sub', 'Subtotal', 100, 'e')], altura=10)
-        self.tv.pack(fill='both', expand=True, padx=10)
-        ttk.Button(esq, text='Adicionar', command=self._add).pack(pady=6)
-        self.lbl = tk.Label(esq, text='Total: R$ 0,00', bg=C['amarelo'], fg=C['verde2'], font=(_F(), 13, 'bold'))
+        self.cliente_fiado = None
+
+        self.busca = cp.BuscaProduto(esq, ao_selecionar=self._ao_selecionar)
+        self.busca.pack(fill='x', padx=10, pady=(10, 4))
+        linha = tk.Frame(esq, bg=C['branco']); linha.pack(fill='x', padx=10)
+        tk.Label(linha, text='Qtd/peso', bg=C['branco'], fg=C['cinza'], font=(_F(), 8, 'bold')).pack(side='left')
+        self.qtd = tk.Entry(linha, width=8, font=(_F(), 11), justify='center'); self.qtd.insert(0, '1')
+        self.qtd.pack(side='left', padx=6)
+        ttk.Button(linha, text='Adicionar', style='Primary.TButton', command=self._add).pack(side='left')
+        tk.Label(linha, text='(KG: use o peso da balança ou digite)', bg=C['branco'], fg=C['cinza'], font=(_F(), 8)).pack(side='left', padx=6)
+        self.tv = cp.tabela(esq, [('nome', 'Produto', 240, 'w'), ('qtd', 'Qtd', 70, 'e'),
+                                  ('preco', 'Preço', 90, 'e'), ('desc', 'Desc.', 80, 'e'), ('sub', 'Subtotal', 100, 'e')], altura=12)
+        self.tv.pack(fill='both', expand=True, padx=10, pady=6)
+        self.tv.bind('<Double-1>', lambda e: self._desc_item())
+        self.tv.bind('<Delete>', lambda e: self._remover())
+        self.lbl = tk.Label(esq, text='Total: R$ 0,00', bg=C['amarelo'], fg=C['verde2'], font=(_F(), 14, 'bold'))
         self.lbl.pack(fill='x', padx=10, pady=(0, 10), ipady=6)
-        self.v_forma = cp.combo(dir_, 'FORMA DE PAGAMENTO', ['dinheiro', 'pix', 'cartao_debito', 'cartao_credito', 'voucher'])
-        self.e_desc = cp.campo(dir_, 'DESCONTO (R$)', '0')
-        ttk.Button(dir_, text='FINALIZAR VENDA', style='Primary.TButton', command=self._finalizar).pack(fill='x', pady=(12, 0))
-        tk.Label(dir_, text='ÚLTIMAS VENDAS', bg=C['branco'], fg=C['cinza'], font=(_F(), 9, 'bold')).pack(anchor='w', pady=(12, 2))
+
+        self.v_forma = cp.combo(dir_, 'FORMA DE PAGAMENTO', ['Dinheiro', 'Pix', 'Débito', 'Crédito', 'Voucher', 'Fiado'])
+        self.v_forma.trace_add('write', lambda *a: self._atualiza_forma())
+        self.lbl_cliente = tk.Label(dir_, text='Cliente (fiado): nenhum', bg=C['branco'], fg=C['cinza'], font=(_F(), 9))
+        self.lbl_cliente.pack(anchor='w', pady=(4, 0))
+        ttk.Button(dir_, text='Selecionar cliente (fiado)', style='Secondary.TButton', command=self._escolher_cliente).pack(anchor='w', pady=(2, 4))
+        self.misto = tk.BooleanVar(value=False)
+        tk.Checkbutton(dir_, text='Pagamento misto (dividir em duas formas)', variable=self.misto,
+                       bg=C['branco'], font=(_F(), 8), command=self._atualiza_forma).pack(anchor='w')
+        self.f2_frame = tk.Frame(dir_, bg=C['branco'])
+        self.v_forma2 = cp.combo(self.f2_frame, 'SEGUNDA FORMA', ['Pix', 'Débito', 'Crédito', 'Dinheiro', 'Voucher'])
+        self.e_valor2 = cp.campo(self.f2_frame, 'VALOR DA SEGUNDA FORMA (R$)', '0')
+        self.e_desc = cp.campo(dir_, 'DESCONTO NO TOTAL (R$)', '0')
+        self.e_recebido = cp.campo(dir_, 'RECEBIDO EM DINHEIRO (R$)', '')
+        self.e_recebido.bind('<KeyRelease>', lambda e: self._render())
+        self.lbl_troco = tk.Label(dir_, text='Troco: R$ 0,00', bg=_C()['verdeclaro'], fg=_C()['verde2'], font=(_F(), 11, 'bold'))
+        self.lbl_troco.pack(fill='x', pady=6, ipady=5)
+        ttk.Button(dir_, text='FINALIZAR VENDA', style='Primary.TButton', command=self._finalizar).pack(fill='x', pady=(6, 0))
+        tk.Label(dir_, text='ÚLTIMAS VENDAS (duplo clique = reimprimir)', bg=C['branco'], fg=C['cinza'], font=(_F(), 9, 'bold')).pack(anchor='w', pady=(12, 2))
         self.hist = cp.tabela(dir_, [('data', 'Data', 130, 'w'), ('forma', 'Pagamento', 100, 'w'), ('total', 'Total', 90, 'e')], altura=8)
         self.hist.pack(fill='both', expand=True)
+        self.hist.bind('<Double-1>', lambda e: self._reimprimir())
+        self._atualiza_forma()
+
+    # --- helpers de pagamento ---
+    def _formas(self):
+        return {'Dinheiro': 'dinheiro', 'Pix': 'pix', 'Débito': 'cartao_debito',
+                'Crédito': 'cartao_credito', 'Voucher': 'voucher', 'Fiado': 'fiado'}
+
+    def _atualiza_forma(self):
+        if self.misto.get():
+            self.f2_frame.pack(fill='x')
+        else:
+            self.f2_frame.pack_forget()
+        self._render()
+
+    def _ao_selecionar(self, p):
+        # KG: usa o peso da balança se disponível; senão pede o peso.
+        if p.get('unidade') == 'KG':
+            peso = None
+            if getattr(self.shell, 'balanca', None) and self.shell.balanca.conectado and self.shell.balanca.leitura_recente(3.0):
+                peso = self.shell.balanca.peso_atual()
+            if peso and peso > 0:
+                self.qtd.delete(0, 'end'); self.qtd.insert(0, f'{peso:.3f}')
+            else:
+                texto = simpledialog.askstring('Peso (kg)', 'Peso em kg (ex.: 1,325):', parent=self)
+                if texto is not None:
+                    self.qtd.delete(0, 'end'); self.qtd.insert(0, texto)
+        else:
+            self.qtd.delete(0, 'end'); self.qtd.insert(0, '1')
 
     def _add(self):
         p = self.busca.produto
         if not p:
             messagebox.showwarning('Produto', 'Busque e selecione o produto.'); return
-        self.carrinho.append({'produto_id': p['id'], 'nome': p['nome'], 'quantidade': 1, 'preco_unitario': g.preco_vigente(p['id'])})
-        self.busca.limpar(); self._render()
+        qtd = cp.parse_float(self.qtd.get(), 0)
+        if qtd <= 0:
+            messagebox.showwarning('Quantidade', 'Informe quantidade/peso maior que zero.'); return
+        preco = g.preco_vigente(p['id'])
+        existente = next((i for i in self.carrinho if i['produto_id'] == p['id']), None)
+        if existente:
+            existente['quantidade'] = round(existente['quantidade'] + qtd, 3)
+        else:
+            self.carrinho.append({'produto_id': p['id'], 'nome': p['nome'], 'unidade': p['unidade'],
+                                  'quantidade': round(qtd, 3), 'preco_unitario': preco, 'desconto': 0})
+        self._chave_venda = None
+        self.busca.limpar(); self.qtd.delete(0, 'end'); self.qtd.insert(0, '1'); self._render()
+
+    def _remover(self):
+        self._chave_venda = None
+        s = self.tv.selection()
+        if s:
+            self.carrinho.pop(int(s[0])); self._render()
+
+    def _desc_item(self):
+        s = self.tv.selection()
+        if not s:
+            return
+        idx = int(s[0]); it = self.carrinho[idx]
+        bruto = it['quantidade'] * it['preco_unitario']
+        v = simpledialog.askfloat('Desconto no item', f'Desconto em R$ para "{it["nome"]}" (máx {tema.moeda(bruto)}):',
+                                  minvalue=0, maxvalue=bruto, initialvalue=it.get('desconto', 0), parent=self)
+        if v is not None:
+            it['desconto'] = round(v, 2); self._chave_venda = None; self._render()
+
+    def _totais(self):
+        bruto_c = g.centavos_itens([{'preco_unitario': i['preco_unitario'], 'quantidade': i['quantidade']} for i in self.carrinho])
+        desc_itens_c = sum(g.centavos(i.get('desconto', 0)) for i in self.carrinho)
+        liquido_c = max(0, bruto_c - desc_itens_c)
+        desc_total_c = min(g.centavos(cp.parse_float(self.e_desc.get(), 0)), liquido_c)
+        final_c = max(0, liquido_c - desc_total_c)
+        return bruto_c, desc_itens_c + desc_total_c, final_c
 
     def _render(self):
         self.tv.delete(*self.tv.get_children())
-        total = 0.0
         for i, it in enumerate(self.carrinho):
-            sub = it['quantidade'] * it['preco_unitario']; total += sub
-            self.tv.insert('', '', tags=('par' if i % 2 == 0 else 'impar',), values=(it['nome'], it['quantidade'], tema.moeda(sub)))
-        self.lbl.config(text=f'Total: {tema.moeda(total)}')
+            sub = it['quantidade'] * it['preco_unitario']
+            custo_ok = float(it.get('preco_unitario') or 0)
+            self.tv.insert('', 'end', iid=str(i), tags=('par' if i % 2 == 0 else 'impar',), values=(
+                it['nome'], tema.formatq(it['quantidade'], it['unidade']), tema.moeda(it['preco_unitario']),
+                tema.moeda(it['desconto']) if it['desconto'] else '—', tema.moeda(max(0, sub - it['desconto']))))
+        _, _, final_c = self._totais()
+        final = final_c / 100
+        self.lbl.config(text=f'Total: {tema.moeda(final)}')
+        receb = cp.parse_float(self.e_recebido.get(), 0)
+        self.lbl_troco.config(text=f'Troco: {tema.moeda(max(0, receb - final))}')
+
+    def _escolher_cliente(self):
+        clientes = op.listar_clientes()
+        if not clientes:
+            messagebox.showinfo('Clientes', 'Cadastre um cliente primeiro (área Clientes).'); return
+        dlg = tk.Toplevel(self); dlg.title('Selecionar cliente'); dlg.geometry('420x420'); dlg.transient(self)
+        e = tk.Entry(dlg, font=(_F(), 10)); e.pack(fill='x', padx=12, pady=8)
+        lb = tk.Listbox(dlg, font=(_F(), 10)); lb.pack(fill='both', expand=True, padx=12, pady=(0, 8))
+
+        def filtrar(_=None):
+            lb.delete(0, 'end'); termo = e.get().strip().lower()
+            for c in clientes:
+                if not termo or termo in c['nome'].lower():
+                    lb.insert('end', f"{c['nome']}  (saldo {tema.moeda(c['saldo_fiado'])})")
+            lb._f = [c for c in clientes if not termo or termo in c['nome'].lower()]
+        e.bind('<KeyRelease>', filtrar); filtrar()
+
+        def escolher(_=None):
+            s = lb.curselection()
+            if not s:
+                return
+            self.cliente_fiado = lb._f[s[0]]
+            self.lbl_cliente.config(text=f"Cliente (fiado): {self.cliente_fiado['nome']}")
+            dlg.destroy()
+        lb.bind('<<ListboxSelect>>', escolher); lb.bind('<Double-1>', escolher)
+        e.focus_set()
 
     def _finalizar(self):
         if not self.carrinho:
             messagebox.showinfo('Venda', 'Carrinho vazio.'); return
+        forma = self._formas().get(self.v_forma.get(), 'dinheiro')
+        if forma == 'fiado' and not self.cliente_fiado:
+            messagebox.showwarning('Fiado', 'Selecione o cliente para venda fiada.'); return
+        _, _, final_c = self._totais()
+        final = final_c / 100
+        if forma == 'dinheiro' and not self.misto.get():
+            receb = cp.parse_float(self.e_recebido.get(), 0)
+            if receb and receb + 0.005 < final:
+                messagebox.showwarning('Recebido', f'Recebido {tema.moeda(receb)} < total {tema.moeda(final)}.'); return
+        itens = [{'produto_id': i['produto_id'], 'quantidade': i['quantidade']} for i in self.carrinho]
+        desconto = sum(i.get('desconto', 0) for i in self.carrinho) + cp.parse_float(self.e_desc.get(), 0)
+        kwargs = {'chave_operacao': getattr(self, '_chave_venda', None) or None}
+        if kwargs['chave_operacao'] is None:
+            import uuid
+            self._chave_venda = uuid.uuid4().hex; kwargs['chave_operacao'] = self._chave_venda
         try:
-            r = op.registrar_venda([{'produto_id': i['produto_id'], 'quantidade': i['quantidade']} for i in self.carrinho],
-                                   self.v_forma.get(), cp.parse_float(self.e_desc.get(), 0))
+            if self.misto.get():
+                v2 = cp.parse_float(self.e_valor2.get(), 0)
+                if v2 <= 0 or v2 >= final:
+                    messagebox.showwarning('Misto', 'O valor da segunda forma deve ser positivo e menor que o total.'); return
+                forma2 = self._formas().get(self.v_forma2.get(), 'pix')
+                pagamentos = [{'forma': forma, 'valor': round(final - v2, 2)}, {'forma': forma2, 'valor': round(v2, 2)}]
+                r = op.registrar_venda(itens, desconto=desconto, cliente_id=self.cliente_fiado['id'] if self.cliente_fiado else None,
+                                       pagamentos=pagamentos, **kwargs)
+            else:
+                r = op.registrar_venda(itens, forma, desconto, self.cliente_fiado['id'] if (self.cliente_fiado and forma == 'fiado') else None, **kwargs)
         except Exception as exc:
             messagebox.showerror('Erro ao salvar', str(exc)); return
-        self.carrinho = []; self._render()
-        self.shell.notificar(f"Venda #{r['id']} finalizada — {tema.moeda(r['valor_total'])}.")
+        self._chave_venda = None
+        venda_id = r['id']
+        self.carrinho = []; self.cliente_fiado = None
+        self.lbl_cliente.config(text='Cliente (fiado): nenhum')
+        self.e_recebido.delete(0, 'end'); self.e_desc.delete(0, 'end'); self.e_valor2.delete(0, 'end'); self.e_valor2.insert(0, '0')
+        self._render()
+        self.shell.notificar(f'Venda #{venda_id} finalizada — {tema.moeda(r["valor_total"])}.')
+        self._imprimir(venda_id)
         self.recarregar(); self.shell.atualizar_inicio()
 
+    def _imprimir(self, venda_id):
+        try:
+            venda = op.detalhar_venda(venda_id)
+            linhas = [('g', 'MERCADINHO'), ('c', 'COMPROVANTE NÃO FISCAL'), ('c', '-' * 32),
+                      ('n', f"Venda #{venda_id:05d}"), ('n', f"Data: {venda['data_hora']}")]
+            for it in venda['itens']:
+                linhas.append(('n', f"{it['nome'][:20]:20} {it['quantidade']:>7.3g} x {it['preco_unitario']:>6.2f}"))
+            linhas += [('c', '-' * 32), ('b', f"TOTAL {tema.moeda(venda['valor_total'])}"),
+                       ('n', f"Pagamento: {venda['forma_pagamento']}")]
+            from impressora import imprimir_cupom
+            imprimir_cupom(linhas)
+            self.shell.notificar(f'Recibo da venda #{venda_id} enviado à impressora.')
+        except Exception as exc:
+            self.shell.notificar(f'Venda salva; impressão indisponível: {exc}')
+
+    def _reimprimir(self):
+        s = self.hist.selection()
+        if s:
+            self._imprimir(int(s[0]))
+
+    def _cancelar(self):
+        sel = self.hist.selection()
+        if not sel:
+            messagebox.showinfo('Cancelar', 'Selecione a venda na lista.'); return
+        vid = int(sel[0])
+        motivo = simpledialog.askstring('Cancelar venda', 'Motivo (estoque e valores serão estornados):', parent=self)
+        if not motivo or not motivo.strip():
+            return
+        try:
+            g.cancelar_venda(vid, motivo.strip())
+        except Exception as exc:
+            messagebox.showerror('Erro', str(exc)); return
+        self.recarregar(); self.shell.atualizar_inicio(); self.shell.notificar(f'Venda #{vid} cancelada.')
+
+    def _abrir_caixa(self):
+        v = simpledialog.askfloat('Abrir caixa', 'Fundo de troco (R$):', parent=self)
+        if v is None:
+            return
+        try:
+            g.abrir_caixa(v)
+        except Exception as exc:
+            messagebox.showerror('Erro', str(exc)); return
+        self.recarregar(); self.shell.notificar('Caixa aberto.')
+
+    def _fechar_caixa(self):
+        dlg = tk.Toplevel(self); dlg.title('Fechar caixa'); dlg.geometry('360x240'); dlg.transient(self)
+        tk.Label(dlg, text='Dinheiro contado na gaveta (R$):', font=(_F(), 10)).pack(anchor='w', padx=16, pady=(16, 2))
+        e_v = tk.Entry(dlg, font=(_F(), 11)); e_v.pack(fill='x', padx=16)
+        tk.Label(dlg, text='Justificativa (se houver diferença):', font=(_F(), 10)).pack(anchor='w', padx=16, pady=(10, 2))
+        e_j = tk.Entry(dlg, font=(_F(), 11)); e_j.pack(fill='x', padx=16)
+
+        def ok():
+            try:
+                esperado = g.fechar_caixa(cp.parse_float(e_v.get(), 0), e_j.get().strip())
+            except Exception as exc:
+                messagebox.showerror('Erro', str(exc), parent=dlg); return
+            dlg.destroy(); self.recarregar(); self.shell.notificar(f'Caixa fechado (esperado {tema.moeda(esperado)}).')
+        ttk.Button(dlg, text='Fechar caixa', style='Primary.TButton', command=ok).pack(pady=16)
+
     def recarregar(self):
+        try:
+            aberto = bool(g.consultar('SELECT 1 FROM sessoes_caixa WHERE fechamento IS NULL'))
+        except Exception:
+            aberto = False
+        self.lbl_caixa.config(text='Caixa ABERTO' if aberto else 'Caixa FECHADO',
+                              fg=(_C()['verde'] if aberto else _C()['vermelho']))
         self.hist.delete(*self.hist.get_children())
         for i, v in enumerate(op.listar_vendas()):
             tag = 'ruim' if v.get('cancelada') else ('par' if i % 2 == 0 else 'impar')
-            self.hist.insert('', 'end', tags=(tag,), values=(v['data_hora'], v['forma_pagamento'],
-                                                             tema.moeda(v['valor_total']) + (' CANCELADA' if v.get('cancelada') else '')))
+            self.hist.insert('', 'end', iid=str(v['id']), tags=(tag,), values=(
+                v['data_hora'], v['forma_pagamento'], tema.moeda(v['valor_total']) + (' CANCELADA' if v.get('cancelada') else '')))
 
 
 # ---------------------------------------------------------------------------
@@ -969,6 +1454,7 @@ class AdministracaoPage(PaginaBase):
         ttk.Button(barra, text='Backup agora', style='Primary.TButton', command=self._backup).pack(side='left', padx=4)
         ttk.Button(barra, text='Restaurar backup', style='Secondary.TButton', command=self._restaurar).pack(side='left', padx=4)
         ttk.Button(barra, text='Atualizar', style='Secondary.TButton', command=self.recarregar).pack(side='left', padx=4)
+        ttk.Button(barra, text='Sair / trocar usuário', style='Secondary.TButton', command=self.shell.sair).pack(side='right', padx=4)
         tk.Label(self, text='USUÁRIOS', bg=C['papel'], fg=C['cinza'], font=(_F(), 9, 'bold')).pack(anchor='w')
         self.tv = cp.tabela(self, [('nome', 'Usuário', 240, 'w'), ('perfil', 'Perfil', 160, 'w'), ('ativo', 'Ativo', 80, 'w')], altura=10)
         self.tv.pack(fill='both', expand=True)

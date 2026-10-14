@@ -6169,6 +6169,12 @@ def _bloquear_instancia_unica():
 if __name__ == '__main__':
     _trava_instancia = _bloquear_instancia_unica()
     try:
-        App().mainloop()
+        _ok, _msg = db.compativel()
+        if not _ok:
+            _root = tk.Tk(); _root.withdraw()
+            messagebox.showerror('Versão incompatível', _msg)
+            _root.destroy()
+        else:
+            App().mainloop()
     finally:
         _trava_instancia.liberar()

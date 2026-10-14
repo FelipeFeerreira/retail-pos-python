@@ -37,6 +37,38 @@ def _backup_antes_migracao():
     return destino
 
 
+def versao_banco():
+    """Versão de esquema gravada no banco aberto (ou None se o banco não
+    existe / não tem schema_meta)."""
+    if not (os.path.exists(DB_PATH) and os.path.getsize(DB_PATH)):
+        return None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='schema_meta'").fetchone():
+                return 0
+            r = conn.execute("SELECT valor FROM schema_meta WHERE chave='versao'").fetchone()
+            return int(r[0]) if r else 0
+        finally:
+            conn.close()
+    except (sqlite3.DatabaseError, ValueError):
+        return None
+
+
+def compativel():
+    """(ok, mensagem). Bloqueia abrir para ESCRITA quando o banco foi migrado
+    por uma versão mais NOVA do aplicativo (esquema desconhecido). Banco igual
+    ou mais antigo é seguro (a migração é aditiva e versionada)."""
+    vb = versao_banco()
+    if vb is None:
+        return True, ''
+    if vb > SCHEMA_VERSAO:
+        return False, (f'Este banco está na versão de esquema {vb}, mais nova que a '
+                       f'deste aplicativo ({SCHEMA_VERSAO}). Abra com a versão mais recente '
+                       'do sistema para não corromper dados.')
+    return True, ''
+
+
 def get_conn():
     conn = sqlite3.connect(DB_PATH, timeout=20)
     conn.row_factory = sqlite3.Row

@@ -99,6 +99,10 @@ def main():
             pass
         sys.exit(0)
     try:
+        ok, msg = db.compativel()
+        if not ok:
+            _erro(msg)
+            return
         db.init_db()
         from reformulacao.shell import Shell
         root = Shell()
@@ -108,6 +112,15 @@ def main():
         root.mainloop()
     finally:
         trava.liberar()
+
+
+def _erro(msg):
+    try:
+        r = tk.Tk(); r.withdraw()
+        messagebox.showerror('Versão incompatível', msg)
+        r.destroy()
+    except Exception:
+        print(msg)
 
 
 if __name__ == '__main__':

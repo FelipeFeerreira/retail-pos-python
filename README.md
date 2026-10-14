@@ -14,10 +14,12 @@ A desktop retail-management application built with **Python, Tkinter and SQLite*
 ## Duas interfaces (transição)
 
 - **Interface reformulada (nova) — `app_reformulado.py`**: navegação por áreas
-  (Início, Vendas, Produtos e estoque, Compras, Operacional, Financeiro,
-  Resultados, Diagnóstico, Administração), organizada em `reformulacao/`
-  (`tema`, `componentes`, `paginas`, `shell`). Usa o **mesmo banco e os mesmos
-  serviços**. É a entrada principal da nova versão.
+  (Início, Vendas, Clientes, Produtos e estoque, Compras, Operacional,
+  Financeiro, Resultados, Diagnóstico, Administração), organizada em
+  `reformulacao/` (`tema`, `componentes`, `paginas`, `shell`). Usa o **mesmo
+  banco e os mesmos serviços**. É a entrada principal da nova versão.
+  Operacional tem abas Consumo/Perdas/Produção/Receitas. Veja a
+  [matriz de funcionalidades](docs/MATRIZ_FUNCIONALIDADES.md).
 - **Interface antiga — `app.py`**: continua disponível durante a transição.
 
 As duas **não podem rodar juntas** no mesmo banco (a trava de instância única

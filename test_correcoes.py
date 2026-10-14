@@ -603,6 +603,29 @@ class DefeitosReformulacaoTest(BaseTemp):
             g.estornar_producao(pr2['id'], 'de novo')  # duplicado
 
 
+class CompatibilidadeTest(BaseTemp):
+    def test_banco_mais_novo_bloqueia(self):
+        conn = db.get_conn()
+        try:
+            conn.execute("INSERT OR REPLACE INTO schema_meta(chave,valor) VALUES('versao',?)", (str(db.SCHEMA_VERSAO + 1),))
+            conn.commit()
+        finally:
+            conn.close()
+        ok, msg = db.compativel()
+        self.assertFalse(ok)
+        self.assertIn('mais nova', msg)
+
+    def test_banco_igual_ou_antigo_ok(self):
+        self.assertTrue(db.compativel()[0])
+        conn = db.get_conn()
+        try:
+            conn.execute("INSERT OR REPLACE INTO schema_meta(chave,valor) VALUES('versao','0')")
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertTrue(db.compativel()[0])  # mais antigo é seguro (migração aditiva)
+
+
 class BalancaTest(unittest.TestCase):
     def test_protocolos_toledo_8217(self):
         from balanca import LeitorBalanca as L

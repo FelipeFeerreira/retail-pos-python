@@ -8,10 +8,13 @@ from tkinter import messagebox, ttk
 from . import tema
 from . import paginas as pg
 
+import gestao as g
+
 # Ordem do menu principal.
 AREAS = [
     ('Início', pg.InicioPage),
     ('Vendas', pg.VendasPage),
+    ('Clientes', pg.ClientesPage),
     ('Produtos e estoque', pg.ProdutosPage),
     ('Compras', pg.ComprasPage),
     ('Operacional', pg.OperacionalPage),
@@ -33,7 +36,25 @@ class Shell(tk.Tk):
         self.configure(bg=C['papel'])
         self._paginas = {}
         self._atual = None
+        self._iniciar_balanca()
         self._construir()
+
+    def _iniciar_balanca(self):
+        """Inicia o leitor da balança (Toledo 8217) se configurado; nunca
+        impede a abertura do sistema."""
+        self.balanca = None
+        try:
+            from balanca import LeitorBalanca
+            from impressora import carregar_config
+            conf = carregar_config()
+            porta = conf.get('balanca_porta', '')
+            if porta:
+                self.balanca = LeitorBalanca.criar_para_toledo_8217(
+                    porta, conf.get('balanca_protocolo', 'P05A (Toledo 8217)'),
+                    baudrate=conf.get('balanca_baudrate'), parity=conf.get('balanca_parity'))
+                self.balanca.iniciar()
+        except Exception:
+            self.balanca = None
 
     def iniciar(self):
         """Mostra a janela e abre o Início (chamado após o login)."""
@@ -90,6 +111,22 @@ class Shell(tk.Tk):
     def notificar(self, texto):
         self.status.config(text=texto)
         self.after(6000, lambda: self.status.config(text='Pronto'))
+
+    def sair(self):
+        """Encerra a sessão: bloqueia e volta ao login, sem expor dados. As
+        páginas são destruídas para não reutilizar estado/ações do usuário
+        anterior (a autorização é revalidada pelo serviço a cada operação)."""
+        g.sair()
+        for pagina in list(self._paginas.values()):
+            pagina.destroy()
+        self._paginas = {}
+        self._atual = None
+        self.withdraw()
+        from app_reformulado import _login
+        if _login(self):
+            self.iniciar()
+        else:
+            self.destroy()
 
     def atualizar_inicio(self):
         ini = self._paginas.get('Início')

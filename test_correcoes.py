@@ -510,6 +510,53 @@ class DefeitosReformulacaoTest(BaseTemp):
         with self.assertRaises(op.ErroOperacao):
             op.registrar_venda([{'produto_id': p, 'quantidade': 2}], 'dinheiro', chave_operacao='V1')
 
+    def test_todos_componentes_reconciliam(self):
+        p = op.criar_produto('RECON', preco_custo=6, preco_venda=10, quantidade_estoque=1000)
+        op.registrar_venda([{'produto_id': p, 'quantidade': 100}], 'cartao_debito', taxa_paga=10)
+        rec = g.consultar("SELECT id FROM recebiveis_cartao WHERE origem='venda'")[0]['id']
+        g.liquidar_cartao(rec, conta_id=2, taxa=10.0)
+        op.registrar_consumo_interno([{'produto_id': p, 'quantidade': 4}], 'Limpeza', finalidade='operacional')
+        op.registrar_consumo_interno([{'produto_id': p, 'quantidade': 2}], 'Lanches', finalidade='equipe')
+        op.registrar_consumo_interno([{'produto_id': p, 'quantidade': 8}], 'Família', finalidade='pessoal')
+        op.registrar_perda([{'produto_id': p, 'quantidade': 3}], 'Quebra/avaria')
+        g.criar_conta_pagar('Credor', 'Aluguel', 100, self.hoje, categoria='Aluguel', competencia=self.hoje)
+        with g.transacao() as c:
+            g.movimento(c, 1, 500, 'Outras receitas', 'Venda de sucata', 'manual', 'r1', data=self.hoje)
+        with g.transacao() as c:
+            g.movimento(c, 1, -200, 'Outras despesas', 'Frete', 'manual', 'd1', data=self.hoje)
+        r = g.resultado_gerencial(self.hoje, self.hoje)
+        mapa = {'vendas': 'vendas_liquidas', 'cmv': 'cmv', 'taxas': 'taxas', 'perdas': 'perdas',
+                'consumo_operacional': 'consumo_operacional', 'consumo_equipe': 'consumo_equipe',
+                'consumo_outro': 'consumo_outro', 'retiradas_pessoais': 'retiradas_pessoais',
+                'despesas_competencia': 'despesas_competencia', 'outras_receitas': 'outras_receitas',
+                'outras_despesas': 'outras_despesas'}
+        for comp, chave in mapa.items():
+            det = g.lancamentos_componente(comp, self.hoje, self.hoje)
+            self.assertAlmostEqual(sum(d['valor'] for d in det), r[chave], 2,
+                                   msg=f'componente {comp}: detalhe != total')
+
+    def test_estorno_producao_restaura_custo_anterior(self):
+        insumo = op.criar_produto('INS-EST', preco_custo=2, preco_venda=3, quantidade_estoque=100)
+        final = op.criar_produto('FIM-EST', preco_custo=5, preco_venda=10, quantidade_estoque=20)
+        rid = prod.criar_receita(final, rendimento=10, itens=[{'insumo_id': insumo, 'quantidade': 10}])
+        pr = g.registrar_producao(rid, 1, validade=(date.today() + timedelta(days=30)).isoformat())
+        op.atualizar_produto(insumo, preco_custo=4)  # custo do insumo muda depois
+        g.estornar_producao(pr['id'], 'engano')
+        self.assertEqual(op.obter_produto(final)['quantidade_estoque'], 20)
+        self.assertEqual(op.obter_produto(final)['preco_custo'], 5)   # snapshot, não o custo atual
+        self.assertEqual(op.obter_produto(insumo)['quantidade_estoque'], 100)
+        self.assertEqual(op.obter_produto(insumo)['preco_custo'], 2)  # restaurado ao anterior
+
+    def test_estorno_producao_bloqueia_ajuste_posterior(self):
+        insumo = op.criar_produto('INS-AJ', preco_custo=2, preco_venda=3, quantidade_estoque=100)
+        final = op.criar_produto('FIM-AJ', preco_custo=0, preco_venda=10, quantidade_estoque=0)
+        rid = prod.criar_receita(final, rendimento=10, itens=[{'insumo_id': insumo, 'quantidade': 10}])
+        pr = g.registrar_producao(rid, 1, validade=(date.today() + timedelta(days=30)).isoformat())
+        g.ajustar_estoque(final, 25, 'ajuste', 'Inventário conferido',
+                          validade=(date.today() + timedelta(days=10)).isoformat())  # movimentação posterior
+        with self.assertRaises(g.ErroGestao):
+            g.estornar_producao(pr['id'], 'engano')
+
     def test_d6_estorno_producao_com_dependencia(self):
         insumo = op.criar_produto('INS', preco_custo=2, preco_venda=3, quantidade_estoque=100)
         final = op.criar_produto('FIM', preco_custo=0, preco_venda=10, quantidade_estoque=0)

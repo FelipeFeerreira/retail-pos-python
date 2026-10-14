@@ -14,8 +14,9 @@ SCHEMA_PATH = os.path.join(BASE_DIR, 'schema.sql')
 # v3 = chave de idempotência em consumo_interno, perdas e producoes;
 # v4 = coluna estornado (estorno auditado) em consumo_interno e perdas;
 # v5 = custo_conhecido em produtos; finalidade estável em consumo_interno;
-#      estornado em producoes (correção de produção).
-SCHEMA_VERSAO = 5
+#      estornado em producoes (correção de produção);
+# v6 = snapshot de estoque/custo anterior para reversão exata de produção.
+SCHEMA_VERSAO = 6
 
 
 def _backup_antes_migracao():

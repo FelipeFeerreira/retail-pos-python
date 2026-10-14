@@ -189,7 +189,9 @@ def migrar(conn):
                              'usuario': "TEXT NOT NULL DEFAULT 'Legado'"},
         'consumo_interno': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'centro_custo': "TEXT NOT NULL DEFAULT ''", 'chave': 'TEXT', 'estornado': 'INTEGER NOT NULL DEFAULT 0', 'finalidade': "TEXT NOT NULL DEFAULT ''"},
         'perdas': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'chave': 'TEXT', 'estornado': 'INTEGER NOT NULL DEFAULT 0'},
-        'producoes': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'validade': 'TEXT', 'rendimento_real': 'REAL', 'chave': 'TEXT', 'estornado': 'INTEGER NOT NULL DEFAULT 0'},
+        'producoes': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'validade': 'TEXT', 'rendimento_real': 'REAL', 'chave': 'TEXT', 'estornado': 'INTEGER NOT NULL DEFAULT 0',
+                      'estoque_anterior_produto': 'REAL', 'custo_anterior_produto': 'REAL'},
+        'insumos_producao': {'estoque_anterior_insumo': 'REAL', 'custo_anterior_insumo': 'REAL'},
     }
     for tabela, colunas in campos.items():
         existentes = {r['name'] for r in conn.execute(f'PRAGMA table_info({tabela})')}
@@ -844,6 +846,22 @@ def lancamentos_componente(componente, inicio, fim):
             return [{'ref': f"Conta #{r['id']}", 'data': r['competencia'], 'descricao': f"{r['credor']} — {r['descricao']}", 'valor': round(r['valor'], 2)} for r in rows]
         if componente == 'taxas':
             return componentes_taxas(inicio, fim)
+        if componente == 'outras_receitas':
+            itens = [{'ref': f"Movimento #{r['id']}", 'data': r['data'], 'descricao': r['descricao'],
+                      'valor': round(r['valor_centavos']/100.0, 2)}
+                     for r in c.execute("SELECT id,data,descricao,valor_centavos FROM movimentos_financeiros WHERE categoria='Outras receitas' AND data BETWEEN ? AND ? ORDER BY data", (inicio, fim)).fetchall()]
+            itens += [{'ref': f"Recebimento fiado #{r['id']}", 'data': r['data_hora'], 'descricao': 'Encargos de fiado recebidos',
+                       'valor': round(r['encargos_centavos']/100.0, 2)}
+                      for r in c.execute("SELECT id,data_hora,encargos_centavos FROM pagamentos_fiado WHERE tipo='recebimento' AND estornado=0 AND encargos_centavos>0 AND date(data_hora) BETWEEN ? AND ? ORDER BY data_hora", (inicio, fim)).fetchall()]
+            return itens
+        if componente == 'outras_despesas':
+            itens = [{'ref': f"Movimento #{r['id']}", 'data': r['data'], 'descricao': r['descricao'],
+                      'valor': round(-r['valor_centavos']/100.0, 2)}
+                     for r in c.execute("SELECT id,data,descricao,valor_centavos FROM movimentos_financeiros WHERE categoria='Outras despesas' AND origem!='conta_pagar' AND valor_centavos<0 AND data BETWEEN ? AND ? ORDER BY data", (inicio, fim)).fetchall()]
+            itens += [{'ref': f"Pagamento #{r['id']}", 'data': r['data'], 'descricao': 'Encargos pagos (líquido de descontos)',
+                       'valor': round((r['encargos_centavos']-r['desconto_centavos'])/100.0, 2)}
+                      for r in c.execute("SELECT id,data,encargos_centavos,desconto_centavos FROM pagamentos_contas WHERE estornado=0 AND (encargos_centavos-desconto_centavos)>0 AND data BETWEEN ? AND ? ORDER BY data", (inicio, fim)).fetchall()]
+            return itens
         return []
     finally:
         c.close()
@@ -993,17 +1011,19 @@ def registrar_producao(receita_id,multiplicador,observacao='',validade=None,rend
         itens=c.execute('SELECT insumo_id,SUM(quantidade) quantidade FROM receita_itens WHERE receita_id=? GROUP BY insumo_id',(receita_id,)).fetchall()
         if not itens: raise ErroGestao('Cadastre os insumos da receita.')
         produzido=quantidade(rendimento_real if rendimento_real is not None else mult*r['rendimento'])
-        pid=c.execute('INSERT INTO producoes(receita_id,multiplicador,quantidade_produzida,observacao,responsavel,validade,rendimento_real,chave) VALUES(?,?,?,?,?,?,?,?)',
-                      (receita_id,mult,produzido,observacao,responsavel or USUARIO,validade,produzido,chave)).lastrowid
+        # Snapshot do estado anterior do produto final (para reversão exata).
+        p_estoque_ant, p_custo_ant = p['quantidade_estoque'], p['preco_custo']
+        pid=c.execute('INSERT INTO producoes(receita_id,multiplicador,quantidade_produzida,observacao,responsavel,validade,rendimento_real,chave,estoque_anterior_produto,custo_anterior_produto) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                      (receita_id,mult,produzido,observacao,responsavel or USUARIO,validade,produzido,chave,p_estoque_ant,p_custo_ant)).lastrowid
         custo,usados=Decimal(0),[]
         for it in itens:
             if it['insumo_id']==p['id']: raise ErroGestao('Produto final não pode consumir a si mesmo.')
             qtd=quantidade(mult*it['quantidade'])
-            insumo=baixar_estoque(c,it['insumo_id'],qtd,'Produção',pid)
+            insumo=baixar_estoque(c,it['insumo_id'],qtd,'Produção',pid)  # devolve o estado ANTERIOR à baixa
             custo+=Decimal(str(insumo['preco_custo']))*Decimal(str(qtd))
             usados.append(dict(insumo_id=insumo['id'],nome=insumo['nome'],quantidade=qtd))
-            c.execute('INSERT INTO insumos_producao(producao_id,produto_id,nome,unidade,quantidade,custo_unitario) VALUES(?,?,?,?,?,?)',
-                      (pid,insumo['id'],insumo['nome'],insumo['unidade'],qtd,insumo['preco_custo']))
+            c.execute('INSERT INTO insumos_producao(producao_id,produto_id,nome,unidade,quantidade,custo_unitario,estoque_anterior_insumo,custo_anterior_insumo) VALUES(?,?,?,?,?,?,?,?)',
+                      (pid,insumo['id'],insumo['nome'],insumo['unidade'],qtd,insumo['preco_custo'],insumo['quantidade_estoque'],insumo['preco_custo']))
         custo=centavos(custo)/100; unitario=custo/produzido
         medio=custo_medio_entrada(p['quantidade_estoque'],p['preco_custo'],produzido,unitario)
         c.execute('UPDATE produtos SET quantidade_estoque=round(quantidade_estoque+?,3),preco_custo=?,perecivel=1 WHERE id=?',(produzido,medio,p['id']))
@@ -1073,10 +1093,20 @@ def estornar_baixa(baixa_id,motivo,perda=False):
 
 
 def estornar_producao(producao_id,motivo):
-    """Corrige uma produção lançada por engano: devolve os insumos (estoque e
-    lotes), remove o produto acabado e seu lote, e marca a produção como
-    estornada. NÃO devolve insumos se o produto acabado já foi vendido,
-    consumido ou perdido depois — detecta dependências e bloqueia."""
+    """Corrige uma produção lançada por engano. Política (correção de erro):
+
+    * Bloqueia se o produto acabado teve QUALQUER uso ou movimentação depois
+      da produção: venda, consumo, perda, outra produção que o consumiu como
+      insumo, ajuste/inventário, consolidação ou outro estorno. Nesses casos o
+      correto é um evento novo (devolução/inventário), não apagar a produção.
+    * Restaura o estado ANTERIOR exato do produto acabado e de cada insumo
+      (estoque e custo médio), usando o snapshot gravado na produção — não
+      recalcula com o custo atual.
+    * Devolve as quantidades aos lotes corretos, remove o lote produzido e
+      marca a produção como estornada. Tudo numa transação; duplicidade de
+      estorno é bloqueada. A data de efeito é agora (registrada na auditoria),
+      portanto períodos anteriores não são reescritos — o estorno aparece como
+      evento do período atual."""
     permitir('estornar')
     if not motivo.strip(): raise ErroGestao('Justifique o estorno.')
     with transacao() as c:
@@ -1086,6 +1116,8 @@ def estornar_producao(producao_id,motivo):
         r=c.execute('SELECT * FROM receitas WHERE id=?',(pr['receita_id'],)).fetchone()
         if not r: raise ErroGestao('Receita da produção não encontrada.')
         pf=r['produto_id']
+        quando=pr['data_hora']
+        # 1) uso posterior do produto acabado em venda/consumo/perda
         uso=c.execute("""SELECT
             (SELECT COUNT(*) FROM itens_venda i JOIN vendas v ON v.id=i.venda_id
                WHERE i.produto_id=? AND v.cancelada=0 AND datetime(v.data_hora)>=datetime(?))
@@ -1093,26 +1125,47 @@ def estornar_producao(producao_id,motivo):
                WHERE ic.produto_id=? AND ci.estornado=0 AND datetime(ci.data_hora)>=datetime(?))
           + (SELECT COUNT(*) FROM itens_perda ip JOIN perdas p ON p.id=ip.perda_id
                WHERE ip.produto_id=? AND p.estornado=0 AND datetime(p.data_hora)>=datetime(?))""",
-          (pf,pr['data_hora'],pf,pr['data_hora'],pf,pr['data_hora'])).fetchone()[0]
+          (pf,quando,pf,quando,pf,quando)).fetchone()[0]
         if uso:
             raise ErroGestao('O produto desta produção já foi vendido/consumido/perdido depois. '
-                             'Estorne esses lançamentos antes de reverter a produção.')
-        c.execute('UPDATE produtos SET quantidade_estoque=round(quantidade_estoque-?,3) WHERE id=?',(pr['quantidade_produzida'],pf))
+                             'Registre um evento novo (devolução/inventário) em vez de reverter a produção.')
+        # 2) outra produção posterior que consumiu este produto como insumo
+        if c.execute("""SELECT 1 FROM insumos_producao ip JOIN producoes p2 ON p2.id=ip.producao_id
+                        WHERE ip.produto_id=? AND p2.estornado=0 AND p2.id!=? AND datetime(p2.data_hora)>=datetime(?)""",
+                     (pf,producao_id,quando)).fetchone():
+            raise ErroGestao('Este produto foi usado como insumo em outra produção depois. Reverta-a primeiro.')
+        # 3) ajuste/inventário ou consolidação posterior
+        mov=c.execute("""SELECT observacao FROM movimentacoes_estoque
+                         WHERE produto_id=? AND datetime(data_hora)>=datetime(?)
+                           AND (observacao LIKE 'Inventário%' OR observacao LIKE 'Ajuste%'
+                                OR observacao LIKE 'Consolidação%' OR observacao LIKE 'Estorno%')""",
+                      (pf,quando)).fetchone()
+        if mov:
+            raise ErroGestao(f'Houve movimentação posterior ({mov["observacao"]}) deste produto. '
+                             'Confira e regularize antes de reverter a produção.')
+        # 4) restaura o estado anterior EXATO (snapshot), não o custo atual
+        c.execute('UPDATE produtos SET quantidade_estoque=?,preco_custo=? WHERE id=?',
+                  (pr['estoque_anterior_produto'],pr['custo_anterior_produto'],pf))
         c.execute("INSERT INTO movimentacoes_estoque(produto_id,tipo,quantidade,observacao) VALUES(?,'saida',?,?)",
                   (pf,pr['quantidade_produzida'],f'Estorno produção #{producao_id}: {motivo}'))
-        lote=c.execute("SELECT id,quantidade FROM lotes_validade WHERE produto_id=? AND observacao=? AND quantidade>0",
+        lote=c.execute("SELECT id FROM lotes_validade WHERE produto_id=? AND observacao=?",
                        (pf,f'Produção #{producao_id}')).fetchone()
         if lote:
-            c.execute('UPDATE lotes_validade SET quantidade=round(quantidade-?,3) WHERE id=?',
-                      (min(lote['quantidade'],pr['quantidade_produzida']),lote['id']))
-        for it in c.execute('SELECT produto_id,quantidade FROM insumos_producao WHERE producao_id=?',(producao_id,)).fetchall():
-            c.execute('UPDATE produtos SET quantidade_estoque=round(quantidade_estoque+?,3) WHERE id=?',(it['quantidade'],it['produto_id']))
+            c.execute('DELETE FROM lotes_validade WHERE id=?',(lote['id'],))
+        for it in c.execute('SELECT * FROM insumos_producao WHERE producao_id=?',(producao_id,)).fetchall():
+            est_ant=it['estoque_anterior_insumo']
+            cust_ant=it['custo_anterior_insumo']
+            if est_ant is None:
+                # produção antiga sem snapshot: devolve só a quantidade
+                c.execute('UPDATE produtos SET quantidade_estoque=round(quantidade_estoque+?,3) WHERE id=?',(it['quantidade'],it['produto_id']))
+            else:
+                c.execute('UPDATE produtos SET quantidade_estoque=?,preco_custo=? WHERE id=?',(est_ant,cust_ant,it['produto_id']))
             c.execute("INSERT INTO movimentacoes_estoque(produto_id,tipo,quantidade,observacao) VALUES(?,'entrada',?,?)",
                       (it['produto_id'],it['quantidade'],f'Estorno produção #{producao_id}: {motivo}'))
         for l in c.execute("SELECT lote_id,quantidade FROM baixas_lotes WHERE origem='Produção' AND referencia=?",(str(producao_id),)).fetchall():
             c.execute('UPDATE lotes_validade SET quantidade=round(quantidade+?,3) WHERE id=?',(l['quantidade'],l['lote_id']))
         c.execute('UPDATE producoes SET estornado=1 WHERE id=?',(producao_id,))
-        auditar(c,'estornar','producoes',producao_id,{'motivo':motivo})
+        auditar(c,'estornar','producoes',producao_id,{'motivo':motivo,'data_efeito':date.today().isoformat()})
         return producao_id
 
 

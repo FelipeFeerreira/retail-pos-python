@@ -626,6 +626,66 @@ class CompatibilidadeTest(BaseTemp):
         self.assertTrue(db.compativel()[0])  # mais antigo é seguro (migração aditiva)
 
 
+class CadeiaCompletaTest(BaseTemp):
+    """Aceite: compra → estoque/lote → produção → venda → fiado/recebimento →
+    consumo/perda → despesa → resultado → estorno, conferindo invariantes."""
+
+    def test_cadeia_completa(self):
+        g.abrir_caixa(0)
+        g.salvar_politica(None, 500, 30, 0, 0)
+        hoje = date.today().isoformat()
+        # Compra de insumo (entra no estoque + conta a pagar de mercadoria).
+        farinha = op.criar_produto('FARINHA', preco_custo=5, preco_venda=8, quantidade_estoque=0)
+        g.receber_compra([{'produto_id': farinha, 'quantidade': 100, 'custo': 5.0}], 'Forn', 'C1',
+                         (date.today() + timedelta(days=30)).isoformat())
+        self.assertEqual(op.obter_produto(farinha)['quantidade_estoque'], 100)
+        # Produção consome insumo e cria produto acabado.
+        pao = op.criar_produto('PAO', preco_custo=0, preco_venda=12, quantidade_estoque=0)
+        rid = prod.criar_receita(pao, rendimento=10, itens=[{'insumo_id': farinha, 'quantidade': 5}])
+        pr = g.registrar_producao(rid, 2, validade=(date.today() + timedelta(days=3)).isoformat())  # 20 pães, usa 10 de farinha
+        self.assertEqual(op.obter_produto(pao)['quantidade_estoque'], 20)
+        self.assertEqual(op.obter_produto(farinha)['quantidade_estoque'], 90)
+        # Venda à vista e fiado.
+        cli = op.criar_cliente('Cliente Cadeia')
+        op.registrar_venda([{'produto_id': pao, 'quantidade': 5}], 'dinheiro')
+        op.registrar_venda([{'produto_id': pao, 'quantidade': 3}], 'fiado', cliente_id=cli)
+        self.assertEqual(op.saldo_fiado(cli), 36.0)
+        # Recebimento do fiado (não é nova venda).
+        vendas_antes = g.consultar('SELECT COUNT(*) n FROM vendas')[0]['n']
+        g.receber_fiado(cli, 36.0)
+        self.assertEqual(g.consultar('SELECT COUNT(*) n FROM vendas')[0]['n'], vendas_antes)
+        self.assertEqual(op.saldo_fiado(cli), 0.0)
+        # Consumo e perda.
+        c = op.registrar_consumo_interno([{'produto_id': pao, 'quantidade': 2}], 'Limpeza', finalidade='operacional')
+        op.registrar_perda([{'produto_id': pao, 'quantidade': 1}], 'Quebra/avaria')
+        # Despesa por competência.
+        g.criar_conta_pagar('Imobiliária', 'Aluguel', 100, hoje, categoria='Aluguel', competencia=hoje)
+        # Resultado e reconciliação de TODOS os componentes.
+        res = g.resultado_gerencial(hoje, hoje)
+        self.assertGreater(res['vendas_liquidas'], 0)
+        self.assertGreater(res['cmv'], 0)
+        self.assertEqual(res['consumo_operacional'], 2 * (op.obter_produto(pao)['preco_custo']))
+        self.assertGreater(res['perdas'], 0)
+        self.assertEqual(res['despesas_competencia'], 100)
+        self.assertFalse(res['parcial'], 'custos conhecidos: não deve ser parcial')
+        mapa = {'vendas': 'vendas_liquidas', 'cmv': 'cmv', 'taxas': 'taxas', 'perdas': 'perdas',
+                'consumo_operacional': 'consumo_operacional', 'consumo_equipe': 'consumo_equipe',
+                'consumo_outro': 'consumo_outro', 'retiradas_pessoais': 'retiradas_pessoais',
+                'despesas_competencia': 'despesas_competencia', 'outras_receitas': 'outras_receitas',
+                'outras_despesas': 'outras_despesas'}
+        for comp, chave in mapa.items():
+            det = g.lancamentos_componente(comp, hoje, hoje)
+            self.assertAlmostEqual(sum(d['valor'] for d in det), res[chave], 2, msg=f'{comp} não reconcilia')
+        # Estorno do consumo corrige o indicador e devolve o estoque.
+        estoque_antes = op.obter_produto(pao)['quantidade_estoque']
+        op.estornar_consumo_interno(c['id'], 'lançado por engano')
+        self.assertEqual(g.resultado_gerencial(hoje, hoje)['consumo_operacional'], 0)
+        self.assertEqual(op.obter_produto(pao)['quantidade_estoque'], estoque_antes + 2)
+        # Estorno da produção (produto acabado já foi usado -> bloqueado).
+        with self.assertRaises(g.ErroGestao):
+            g.estornar_producao(pr['id'], 'engano')
+
+
 class BalancaTest(unittest.TestCase):
     def test_protocolos_toledo_8217(self):
         from balanca import LeitorBalanca as L

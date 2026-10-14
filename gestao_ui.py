@@ -210,7 +210,28 @@ class GestaoMixin:
         ttk.Button(barra,text='Conferir saldo inicial',command=lambda:self._executar_gestao(self._saldo_inicial_ui)).pack(side='left')
         ttk.Button(barra,text='Adicionar conta',command=self._nova_conta_financeira_ui).pack(side='left',padx=8)
         self.fin_contas=self._tabela_gestao(contas,[('nome','Conta',210),('tipo','Tipo',95),('base','Data base',100),('saldo','Saldo calculado',130),('conferida','Saldo inicial conferido?',190)])
-        self.dre_texto=tk.Text(dre,wrap='word',font=('Consolas',11),height=12,padx=15,pady=15); self.dre_texto.pack(fill='both',expand=True)
+        # Painel gerencial estruturado (competência) + bloco "caixa não é lucro".
+        self.dre_cab=ttk.Label(dre,text='',font=('Segoe UI',11,'bold')); self.dre_cab.pack(anchor='w',padx=10,pady=(8,0))
+        self.dre_aviso=ttk.Label(dre,text='',foreground='#946000',wraplength=900,justify='left'); self.dre_aviso.pack(anchor='w',padx=10,pady=(0,4))
+        corpo_dre=ttk.Frame(dre); corpo_dre.pack(fill='both',expand=True,padx=8,pady=(0,8))
+        corpo_dre.columnconfigure(0,weight=3); corpo_dre.columnconfigure(1,weight=2); corpo_dre.rowconfigure(0,weight=1)
+        self.dre_tree=ttk.Treeview(corpo_dre,columns=('componente','valor'),show='headings',height=15)
+        self.dre_tree.heading('componente',text='Resultado gerencial (competência)')
+        self.dre_tree.heading('valor',text='Valor')
+        self.dre_tree.column('componente',width=340); self.dre_tree.column('valor',width=130,anchor='e')
+        self.dre_tree.tag_configure('total',font=('Segoe UI',10,'bold'))
+        self.dre_tree.tag_configure('sub',foreground='#24475c')
+        self.dre_tree.tag_configure('pessoal',foreground='#9A6700')
+        self.dre_tree.grid(row=0,column=0,sticky='nsew')
+        self.dre_tree.bind('<Double-1>',lambda e:self._detalhar_componente())
+        self.caixa_tree=ttk.Treeview(corpo_dre,columns=('item','valor'),show='headings',height=15)
+        self.caixa_tree.heading('item',text='Caixa não é lucro (saldos e movimento)')
+        self.caixa_tree.heading('valor',text='Valor')
+        self.caixa_tree.column('item',width=240); self.caixa_tree.column('valor',width=120,anchor='e')
+        self.caixa_tree.tag_configure('total',font=('Segoe UI',10,'bold'))
+        self.caixa_tree.grid(row=0,column=1,sticky='nsew',padx=(8,0))
+        barra_dre=ttk.Frame(dre); barra_dre.pack(fill='x',padx=10,pady=(0,6))
+        ttk.Button(barra_dre,text='Ver lançamentos do componente selecionado',command=self._detalhar_componente).pack(side='left')
 
     def _periodo_financeiro(self,dias):
         self.fin_inicio.set((date.today()-timedelta(days=dias)).isoformat()); self.fin_fim.set(date.today().isoformat()); self._atualizar_financeiro()
@@ -273,24 +294,64 @@ class GestaoMixin:
             self.fin_cartoes.insert('','end',iid=r['id'],values=(r['origem'],r['referencia'],self._moeda(r['bruto_centavos']/100),self._moeda(r['taxa_centavos']/100),r['previsto'],r['liquidado'] or 'A liquidar'))
         for r in saldos:
             self.fin_contas.insert('','end',iid=r['id'],values=(r['nome'],r['tipo'],r['data_base'],self._moeda(r['saldo_centavos']/100),'Sim' if r['conferida'] else 'PENDENTE'),tags=(() if r['conferida'] else ('alerta',)))
-        linhas=[f'DRE GERENCIAL POR COMPETÊNCIA | {inicio} a {fim}', '',f"Vendas líquidas de descontos: {self._moeda(d['vendas'])}",f"(-) CMV histórico registrado: {self._moeda(d['cmv'])}",f"Margem bruta: {d['margem']:.2f}%",f"(-) Taxas de venda: {self._moeda(d['taxas'])}",f"(-) Consumo interno: {self._moeda(d['consumo'])}",f"(-) Perdas: {self._moeda(d['perdas'])}",f"(-) Despesas por competência: {self._moeda(d['despesas'])}",f"Resultado gerencial: {self._moeda(d['resultado'])}",'','Compras de mercadoria permanecem em estoque até venda/consumo/perda.','Consumo e perdas não são novas saídas de dinheiro.']
-        linhas.insert(10,f"(+) Encargos de fiado recebidos: {self._moeda(d['encargos_recebidos'])}")
-        linhas.insert(11,f"(-) Encargos pagos, líquidos de descontos: {self._moeda(d['encargos_pagos'])}")
-        linhas.insert(12,f"(+) Outras receitas: {self._moeda(d['outras_receitas'])}")
-        linhas+=['',f"Fluxo livre gerencial (movimento líquido sem aportes/retiradas): {self._moeda(d['fluxo_livre'])}",'Encargos do fiado são apresentados quando recebidos; a estimativa ainda não recebida consta nos títulos.']
-        if d['sem_custo']:
-            linhas=[('Margem bruta: indisponível — custos históricos incompletos' if l.startswith('Margem bruta:') else 'Resultado gerencial: indisponível — custos históricos incompletos' if l.startswith('Resultado gerencial:') else l) for l in linhas]
-            linhas+=['',f"ATENÇÃO: {d['sem_custo']} item(ns) antigo(s) sem custo histórico. O CMV acima é somente o valor documentado, não o custo completo do período."]
-        formas=an.vendas_por_forma_pagamento(inicio,fim)
-        if formas:
-            linhas+=['','RECEBIDO POR FORMA DE PAGAMENTO (vendas do período)']
-            for f in formas:
-                if f['forma']=='fiado': extra=' — a receber'
-                elif f['taxas']: extra=f" — líquido {self._moeda(f['liquido'])}"
-                else: extra=''
-                linhas.append(f"{f['rotulo']}: {self._moeda(f['total'])} ({f['pct']:.1f}% · {f['n']} venda(s)){extra}")
-        linhas+=['','Este demonstrativo gerencial depende da classificação completa das despesas; não substitui a apuração contábil/fiscal.']
-        self.dre_texto.config(state='normal'); self.dre_texto.delete('1.0','end'); self.dre_texto.insert('1.0','\n'.join(linhas)); self.dre_texto.config(state='disabled')
+        self._desenha_resultado_gerencial(inicio, fim)
+
+    def _desenha_resultado_gerencial(self, inicio, fim):
+        res = g.resultado_gerencial(inicio, fim)
+        painel = g.painel_financeiro(inicio, fim)
+        self.dre_cab.config(text=f"Resultado gerencial por competência — {res['inicio']} a {res['fim']}")
+        self.dre_aviso.config(text=('⚠ RESULTADO PARCIAL: ' + '; '.join(res['pendencias']) +
+                                    '. Não trate o valor como exato.') if res['parcial'] else '')
+        self._dre_componentes = {}
+        self.dre_tree.delete(*self.dre_tree.get_children())
+        linhas = [
+            ('vendas', 'Vendas líquidas de descontos e cancelamentos', res['vendas_liquidas'], ''),
+            ('cmv', '(−) CMV histórico das mercadorias vendidas', -res['cmv'], ''),
+            (None, f"= Margem bruta ({res['margem_pct']:.1f}%)", res['margem_bruta'], 'sub'),
+            ('taxas', '(−) Taxas de cartão e outros meios', -res['taxas'], ''),
+            ('perdas', '(−) Perdas de mercadorias (a preço de custo)', -res['perdas'], ''),
+            ('consumo_operacional', '(−) Consumo operacional', -res['consumo_operacional'], ''),
+            ('consumo_equipe', '(−) Consumo da equipe', -res['consumo_equipe'], ''),
+            ('consumo_outro', '(−) Consumo a classificar', -res['consumo_outro'], ''),
+            ('despesas_competencia', '(−) Despesas da loja por competência', -res['despesas_competencia'], ''),
+            (None, '(+) Outras receitas', res['outras_receitas'], ''),
+            (None, '(−) Outras despesas', -res['outras_despesas'], ''),
+            (None, '= RESULTADO LÍQUIDO GERENCIAL', res['resultado_liquido'], 'total'),
+            ('retiradas_pessoais', '(−) Retiradas pessoais/familiares (a preço de custo)', -res['retiradas_pessoais'], 'pessoal'),
+            (None, '= RESULTADO APÓS RETIRADAS PESSOAIS/FAMILIARES', res['resultado_apos_retiradas'], 'total'),
+        ]
+        for i, (comp, rotulo, valor, tag) in enumerate(linhas):
+            iid = comp or f'linha{i}'
+            if comp:
+                self._dre_componentes[iid] = comp
+            self.dre_tree.insert('', 'end', iid=iid, tags=(tag,) if tag else (), values=(rotulo, self._moeda(valor)))
+
+        self.caixa_tree.delete(*self.caixa_tree.get_children())
+        for rotulo, valor, tag in [
+            ('Dinheiro em caixa', painel['dinheiro'], 'total'),
+            ('Saldo bancário registrado', painel['banco'], 'total'),
+            ('Cartão a receber (não liquidado)', painel['cartao_receber'], ''),
+            ('Fiado a receber', painel['fiado_receber'], ''),
+            ('Contas a pagar em aberto', painel['contas_pagar'], ''),
+            ('Entradas efetivas do período', painel['entradas'], ''),
+            ('Saídas efetivas do período', -painel['saidas'], ''),
+            ('Fluxo efetivo do período', painel['fluxo'], 'total'),
+        ]:
+            self.caixa_tree.insert('', 'end', tags=(tag,) if tag else (), values=(rotulo, self._moeda(valor)))
+        for f in an.vendas_por_forma_pagamento(inicio, fim):
+            extra = ' (a receber)' if f['forma'] == 'fiado' else ''
+            self.caixa_tree.insert('', 'end', values=(f"  recebido · {f['rotulo']} ({f['n']}){extra}", self._moeda(f['total'])))
+
+    def _detalhar_componente(self):
+        sel = self.dre_tree.selection()
+        comp = self._dre_componentes.get(sel[0]) if sel else None
+        if not comp:
+            messagebox.showinfo('Detalhar componente',
+                                'Selecione uma linha do resultado que tenha lançamentos '
+                                '(vendas, CMV, taxas, perdas, consumo, despesas ou retiradas).')
+            return
+        rows = g.lancamentos_componente(comp, self.fin_inicio.get(), self.fin_fim.get())
+        self._listar_registros(f"Lançamentos — {comp.replace('_', ' ')}", rows)
 
     def _contas_opcoes(self):
         return [f"{r['id']} — {r['nome']}" for r in g.contas_saldos()]
@@ -309,7 +370,8 @@ class GestaoMixin:
 
     def _nova_conta_ui(self):
         hoje=date.today().isoformat()
-        self._formulario('Nova conta a pagar',[('credor','Credor / fornecedor','',None),('descricao','Descrição','',None),('valor','Valor original (R$)','',None),('vencimento','Vencimento',hoje,None),('emissao','Emissão',hoje,None),('competencia','Competência',hoje,None),('categoria','Categoria','Despesas fixas',['Mercadoria para revenda','Despesas fixas','Despesas variáveis','Investimento']),('documento','Número do documento / boleto','',None),('compra_ref','Referência da compra de estoque (opcional)','',None)],lambda v:g.criar_conta_pagar(**v))
+        self._formulario('Nova conta a pagar',[('credor','Credor / fornecedor','',None),('descricao','Descrição','',None),('valor','Valor original (R$)','',None),('vencimento','Vencimento',hoje,None),('emissao','Emissão',hoje,None),('competencia','Competência (mês em que a despesa conta no resultado)',hoje,None),('categoria','Categoria','Despesas fixas',g.CATEGORIAS_CONTA),('documento','Número do documento / boleto','',None),('compra_ref','Referência da compra de estoque (opcional)','',None)],lambda v:g.criar_conta_pagar(**v),
+                         'A despesa entra no resultado pela COMPETÊNCIA e no caixa quando for paga. Mercadoria para revenda e Investimento não são despesa operacional.')
 
     def _pagar_ui(self):
         tid=self._selecionado(self.fin_pagar); t=next(x for x in g.contas_pagar() if x['id']==tid)
@@ -362,7 +424,7 @@ class GestaoMixin:
             if valor<=0 or not v['descricao']: raise g.ErroGestao('Informe valor positivo e descrição.')
             if v['sentido']=='Saída': valor=-valor
             with g.transacao() as c: g.movimento(c,int(v['conta'].split(' — ')[0]),valor,v['categoria'],v['descricao'],'manual',uuid.uuid4().hex,data=v['data'])
-        self._formulario('Outra movimentação financeira',[('sentido','Movimentação','Entrada',['Entrada','Saída']),('conta','Conta',contas[0],contas),('valor','Valor (R$)','',None),('categoria','Categoria','Aporte',['Aporte','Retirada','Outras receitas','Investimento']),('descricao','Descrição / justificativa','',None),('data','Data',date.today().isoformat(),None)],salvar,'Despesas devem ser cadastradas em Contas a pagar e quitadas ali, inclusive pagamentos à vista.')
+        self._formulario('Outra movimentação financeira',[('sentido','Movimentação','Entrada',['Entrada','Saída']),('conta','Conta',contas[0],contas),('valor','Valor (R$)','',None),('categoria','Categoria','Aporte',['Aporte','Retirada','Outras receitas','Outras despesas','Investimento']),('descricao','Descrição / justificativa','',None),('data','Data',date.today().isoformat(),None)],salvar,'Despesas operacionais devem ser cadastradas em Contas a pagar (competência + caixa). Aporte, Retirada e Transferência NÃO são receita nem despesa. Use "Outras receitas/despesas" só para o que não passa por conta a pagar.')
 
     def _exportar_dados(self,rows,nome):
         caminho=filedialog.asksaveasfilename(parent=self,defaultextension='.csv',initialfile=nome+'.csv',filetypes=[('CSV','*.csv')])

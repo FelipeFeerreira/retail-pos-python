@@ -11,8 +11,9 @@ SCHEMA_PATH = os.path.join(BASE_DIR, 'schema.sql')
 # `versao_gravada < SCHEMA_VERSAO` que dispara o backup pré-migração — se a
 # versão não mudar, instalações que já estão nela migram SEM backup.
 # Histórico: v1 = migração de gestão inicial; v2 = venda_pagamentos;
-# v3 = chave de idempotência em consumo_interno, perdas e producoes.
-SCHEMA_VERSAO = 3
+# v3 = chave de idempotência em consumo_interno, perdas e producoes;
+# v4 = coluna estornado (estorno auditado) em consumo_interno e perdas.
+SCHEMA_VERSAO = 4
 
 
 def _backup_antes_migracao():

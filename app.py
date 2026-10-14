@@ -2784,6 +2784,7 @@ class App(GestaoMixin, tk.Tk):
         self.tree_hist_consumo.column('valor', width=120, anchor='e')
         self.tree_hist_consumo.tag_configure('par', background=COR['branco'])
         self.tree_hist_consumo.tag_configure('impar', background=COR['zebra'])
+        self.tree_hist_consumo.tag_configure('estornado', foreground=COR['cinza'], font=(FONTE, 9, 'overstrike'))
         self.tree_hist_consumo.bind('<Double-1>', lambda e: self._ver_detalhe_consumo())
         self.tree_hist_consumo.grid(row=0, column=0, sticky='nsew')
         sch = ttk.Scrollbar(bloco_hist, orient='vertical', command=self.tree_hist_consumo.yview)
@@ -2851,9 +2852,11 @@ class App(GestaoMixin, tk.Tk):
         self.tree_hist_consumo.delete(*self.tree_hist_consumo.get_children())
         for i, c in enumerate(op.listar_consumo_interno()):
             self._consumo_hist_cache[c['id']] = c
-            tag = 'par' if i % 2 == 0 else 'impar'
+            estornado = bool(c.get('estornado'))
+            tag = 'estornado' if estornado else ('par' if i % 2 == 0 else 'impar')
             self.tree_hist_consumo.insert('', 'end', iid=str(c['id']), tags=(tag,),
-                                           values=(c['data_hora'], c['motivo'] or '—', self._moeda(c['valor_total'])))
+                                           values=(c['data_hora'], c['motivo'] or '—',
+                                                   self._moeda(c['valor_total']) + (' ESTORNADO' if estornado else '')))
 
     def _ver_detalhe_consumo(self):
         sel = self.tree_hist_consumo.selection()
@@ -2892,7 +2895,30 @@ class App(GestaoMixin, tk.Tk):
             tv.insert('', 'end', tags=(tag,), values=(item['nome'], self._formatq(item['quantidade'], item['unidade']), self._moeda(item['subtotal'])))
 
         tk.Label(dlg, text=f"Total: {self._moeda(dados['valor_total'])}", bg=COR['branco'], fg=COR['verde2'], font=(FONTE, 12, 'bold')).pack(anchor='e', padx=24, pady=(0, 10))
-        ttk.Button(dlg, text='Fechar', style='Secondary.TButton', command=dlg.destroy).pack(pady=(0, 18))
+        botoes = tk.Frame(dlg, bg=COR['branco'])
+        botoes.pack(fill='x', padx=24, pady=(0, 18), side='bottom')
+        if dados.get('estornado'):
+            tk.Label(botoes, text='Lançamento estornado', bg=COR['branco'], fg=COR['vermelho'],
+                     font=(FONTE, 9, 'bold')).pack(side='left')
+        else:
+            ttk.Button(botoes, text='Estornar lançamento', style='Secondary.TButton',
+                       command=lambda: self._estornar_consumo(dados['id'], dlg)).pack(side='left')
+        ttk.Button(botoes, text='Fechar', style='Secondary.TButton', command=dlg.destroy).pack(side='right')
+
+    def _estornar_consumo(self, consumo_id, dlg):
+        motivo = simpledialog.askstring('Estornar consumo', 'Motivo do estorno (o lançamento original é preservado):', parent=dlg)
+        if not motivo or not motivo.strip():
+            return
+        try:
+            op.estornar_consumo_interno(consumo_id, motivo.strip())
+        except Exception as exc:
+            messagebox.showerror('Erro', str(exc), parent=dlg)
+            return
+        dlg.destroy()
+        self._carrega_historico_consumo()
+        self._carrega_resumo_consumo()
+        self._carrega_produtos()
+        self._toast('Consumo estornado; estoque devolvido.')
 
     def _busca_tecla_consumo(self, event):
         if event.keysym in ('Return', 'Up', 'Down'):
@@ -3228,6 +3254,7 @@ class App(GestaoMixin, tk.Tk):
         self.tree_hist_perda.column('valor', width=120, anchor='e')
         self.tree_hist_perda.tag_configure('par', background=COR['branco'])
         self.tree_hist_perda.tag_configure('impar', background=COR['zebra'])
+        self.tree_hist_perda.tag_configure('estornado', foreground=COR['cinza'], font=(FONTE, 9, 'overstrike'))
         self.tree_hist_perda.bind('<Double-1>', lambda e: self._ver_detalhe_perda())
         self.tree_hist_perda.grid(row=0, column=0, sticky='nsew')
         sch_perda = ttk.Scrollbar(bloco_hist_perda, orient='vertical', command=self.tree_hist_perda.yview)
@@ -3250,9 +3277,11 @@ class App(GestaoMixin, tk.Tk):
         self.tree_hist_perda.delete(*self.tree_hist_perda.get_children())
         for i, c in enumerate(op.listar_perdas()):
             self._perda_hist_cache[c['id']] = c
-            tag = 'par' if i % 2 == 0 else 'impar'
+            estornado = bool(c.get('estornado'))
+            tag = 'estornado' if estornado else ('par' if i % 2 == 0 else 'impar')
             self.tree_hist_perda.insert('', 'end', iid=str(c['id']), tags=(tag,),
-                                           values=(c['data_hora'], c['motivo'] or '—', self._moeda(c['valor_total'])))
+                                           values=(c['data_hora'], c['motivo'] or '—',
+                                                   self._moeda(c['valor_total']) + (' ESTORNADO' if estornado else '')))
 
     def _ver_detalhe_perda(self):
         sel = self.tree_hist_perda.selection()
@@ -3291,7 +3320,31 @@ class App(GestaoMixin, tk.Tk):
             tv.insert('', 'end', tags=(tag,), values=(item['nome'], self._formatq(item['quantidade'], item['unidade']), self._moeda(item['subtotal'])))
 
         tk.Label(dlg, text=f"Total: {self._moeda(dados['valor_total'])}", bg=COR['branco'], fg=COR['verde2'], font=(FONTE, 12, 'bold')).pack(anchor='e', padx=24, pady=(0, 10))
-        ttk.Button(dlg, text='Fechar', style='Secondary.TButton', command=dlg.destroy).pack(pady=(0, 18))
+        botoes = tk.Frame(dlg, bg=COR['branco'])
+        botoes.pack(fill='x', padx=24, pady=(0, 18), side='bottom')
+        if dados.get('estornado'):
+            tk.Label(botoes, text='Lançamento estornado', bg=COR['branco'], fg=COR['vermelho'],
+                     font=(FONTE, 9, 'bold')).pack(side='left')
+        else:
+            ttk.Button(botoes, text='Estornar lançamento', style='Secondary.TButton',
+                       command=lambda: self._estornar_perda(dados['id'], dlg)).pack(side='left')
+        ttk.Button(botoes, text='Fechar', style='Secondary.TButton', command=dlg.destroy).pack(side='right')
+
+    def _estornar_perda(self, perda_id, dlg):
+        motivo = simpledialog.askstring('Estornar perda', 'Motivo do estorno (o lançamento original é preservado):', parent=dlg)
+        if not motivo or not motivo.strip():
+            return
+        try:
+            op.estornar_perda(perda_id, motivo.strip())
+        except Exception as exc:
+            messagebox.showerror('Erro', str(exc), parent=dlg)
+            return
+        dlg.destroy()
+        self._carrega_historico_perda()
+        self._carrega_resumo_perda()
+        self._carrega_produtos()
+        self._carrega_estoque()
+        self._toast('Perda estornada; estoque e lotes devolvidos.')
 
     def _busca_tecla_perda(self, event):
         if event.keysym in ('Return', 'Up', 'Down'):

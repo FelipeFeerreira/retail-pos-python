@@ -315,6 +315,139 @@ class MigracaoVersaoTest(BaseTemp):
         self.assertEqual(depois - antes, set(), 'migração repetida não deve criar backup novo')
 
 
+class ResultadoGerencialTest(BaseTemp):
+    def setUp(self):
+        super().setUp()
+        g.abrir_caixa(0)
+        g.salvar_politica(None, 500, 30, 0, 0)
+        self.hoje = date.today().isoformat()
+        # P1 custo 6 / venda 10; P2 custo 5 / venda 8.
+        self.p1 = op.criar_produto('P1', preco_custo=6, preco_venda=10, quantidade_estoque=1000)
+        self.p2 = op.criar_produto('P2', preco_custo=5, preco_venda=8, quantidade_estoque=100)
+
+    def test_estrutura_do_resultado(self):
+        # Vendas 1000 (100 x 10), CMV 600, taxa 10.
+        op.registrar_venda([{'produto_id': self.p1, 'quantidade': 100}], 'dinheiro', taxa_paga=10)
+        # Consumo operacional 20 (4 x 5) e equipe 10 (2 x 5).
+        op.registrar_consumo_interno([{'produto_id': self.p2, 'quantidade': 4}], 'Limpeza')
+        op.registrar_consumo_interno([{'produto_id': self.p2, 'quantidade': 2}], 'Lanches da equipe')
+        # Perda 20 (4 x 5).
+        op.registrar_perda([{'produto_id': self.p2, 'quantidade': 4}], 'Quebra/avaria')
+        # Despesa 100 por competência.
+        g.criar_conta_pagar('Imobiliária', 'Aluguel', 100, self.hoje, categoria='Aluguel', competencia=self.hoje)
+        # Retirada familiar 40 (8 x 5).
+        op.registrar_consumo_interno([{'produto_id': self.p2, 'quantidade': 8}], 'Consumo pessoal/família')
+
+        r = g.resultado_gerencial(self.hoje, self.hoje)
+        self.assertEqual(r['vendas_liquidas'], 1000)
+        self.assertEqual(r['cmv'], 600)
+        self.assertEqual(r['taxas'], 10)
+        self.assertEqual(r['perdas'], 20)
+        self.assertEqual(r['consumo_operacional'], 20)
+        self.assertEqual(r['consumo_equipe'], 10)
+        self.assertEqual(r['consumo_outro'], 0)
+        self.assertEqual(r['despesas_competencia'], 100)
+        self.assertEqual(r['resultado_liquido'], 240)          # 1000-600-10-20-20-10-100
+        self.assertEqual(r['retiradas_pessoais'], 40)
+        self.assertEqual(r['resultado_apos_retiradas'], 200)   # 240 - 40
+        self.assertFalse(r['parcial'])
+
+        # Estoque diminuiu pela retirada (18 unidades de P2: 4+2+4+8).
+        self.assertEqual(op.obter_produto(self.p2)['quantidade_estoque'], 82)
+        # Consumo não gera saída de dinheiro.
+        self.assertEqual(g.consultar("SELECT COUNT(*) n FROM movimentos_financeiros WHERE origem='consumo'")[0]['n'], 0)
+
+    def test_drilldown_soma_bate_com_o_painel(self):
+        op.registrar_venda([{'produto_id': self.p1, 'quantidade': 100}], 'dinheiro', taxa_paga=10)
+        op.registrar_consumo_interno([{'produto_id': self.p2, 'quantidade': 4}], 'Limpeza')
+        op.registrar_consumo_interno([{'produto_id': self.p2, 'quantidade': 8}], 'Consumo pessoal/família')
+        r = g.resultado_gerencial(self.hoje, self.hoje)
+        detalhe_vendas = g.lancamentos_componente('vendas', self.hoje, self.hoje)
+        self.assertAlmostEqual(sum(d['valor'] for d in detalhe_vendas), r['vendas_liquidas'], 2)
+        detalhe_consumo = g.lancamentos_componente('consumo_operacional', self.hoje, self.hoje)
+        self.assertAlmostEqual(sum(d['valor'] for d in detalhe_consumo), r['consumo_operacional'], 2)
+        detalhe_pessoal = g.lancamentos_componente('retiradas_pessoais', self.hoje, self.hoje)
+        self.assertAlmostEqual(sum(d['valor'] for d in detalhe_pessoal), r['retiradas_pessoais'], 2)
+
+    def test_custo_desconhecido_marca_parcial(self):
+        p = op.criar_produto('SEM CUSTO', preco_custo=0, preco_venda=5, quantidade_estoque=10)
+        op.registrar_consumo_interno([{'produto_id': p, 'quantidade': 1}], 'Limpeza')
+        r = g.resultado_gerencial(self.hoje, self.hoje)
+        self.assertTrue(r['parcial'])
+        self.assertTrue(any('consumo' in p.lower() for p in r['pendencias']))
+
+    def test_compra_de_mercadoria_nao_entra_como_despesa(self):
+        g.receber_compra([{'produto_id': self.p1, 'quantidade': 10, 'custo': 6.0}],
+                         'Fornecedor', 'DOC-1', self.hoje)
+        r = g.resultado_gerencial(self.hoje, self.hoje)
+        self.assertEqual(r['despesas_competencia'], 0)  # mercadoria não é despesa; vira estoque
+
+    def test_conta_parcial_afeta_competencia_e_caixa(self):
+        tid = g.criar_conta_pagar('Energia', 'Conta de luz', 100, self.hoje, categoria='Energia', competencia=self.hoje)
+        r1 = g.resultado_gerencial(self.hoje, self.hoje)
+        self.assertEqual(r1['despesas_competencia'], 100)  # competência: valor cheio
+        g.pagar_conta(tid, 40, conta_id=2, metodo='Pix')
+        r2 = g.resultado_gerencial(self.hoje, self.hoje)
+        self.assertEqual(r2['despesas_competencia'], 100)  # pagamento parcial não duplica
+        painel = g.painel_financeiro(self.hoje, self.hoje)
+        self.assertEqual(painel['saidas'], 40)             # caixa: só o que foi pago
+
+    def test_fiado_e_recebimento_nao_duplicam_receita(self):
+        cli = op.criar_cliente('Cliente Fiado')
+        op.registrar_venda([{'produto_id': self.p1, 'quantidade': 5}], 'fiado', cliente_id=cli)
+        r1 = g.resultado_gerencial(self.hoje, self.hoje)
+        self.assertEqual(r1['vendas_liquidas'], 50)
+        g.receber_fiado(cli, 50)
+        r2 = g.resultado_gerencial(self.hoje, self.hoje)
+        self.assertEqual(r2['vendas_liquidas'], 50)        # recebimento não é nova venda
+        painel = g.painel_financeiro(self.hoje, self.hoje)
+        self.assertEqual(painel['entradas'], 50)           # mas entra no caixa
+        self.assertEqual(painel['fiado_receber'], 0)
+
+    def test_producao_nao_duplica_custo(self):
+        insumo = op.criar_produto('INSUMO', preco_custo=2, preco_venda=3, quantidade_estoque=100)
+        final = op.criar_produto('FINAL', preco_custo=0, preco_venda=10, quantidade_estoque=0)
+        rid = prod.criar_receita(final, rendimento=10, itens=[{'insumo_id': insumo, 'quantidade': 10}])
+        g.registrar_producao(rid, 1, validade=(date.today() + timedelta(days=30)).isoformat())
+        r = g.resultado_gerencial(self.hoje, self.hoje)
+        self.assertEqual(r['consumo_operacional'] + r['consumo_equipe'] + r['consumo_outro'], 0)
+        self.assertEqual(r['perdas'], 0)
+        self.assertEqual(op.obter_produto(final)['quantidade_estoque'], 10)
+        self.assertEqual(op.obter_produto(insumo)['quantidade_estoque'], 90)
+
+    def test_estorno_corrige_indicadores(self):
+        c = op.registrar_consumo_interno([{'produto_id': self.p2, 'quantidade': 4}], 'Limpeza')
+        self.assertEqual(g.resultado_gerencial(self.hoje, self.hoje)['consumo_operacional'], 20)
+        self.assertEqual(op.obter_produto(self.p2)['quantidade_estoque'], 96)
+        op.estornar_consumo_interno(c['id'], 'Lancei errado')
+        self.assertEqual(g.resultado_gerencial(self.hoje, self.hoje)['consumo_operacional'], 0)
+        self.assertEqual(op.obter_produto(self.p2)['quantidade_estoque'], 100)
+        with self.assertRaises(op.ErroOperacao):
+            op.estornar_consumo_interno(c['id'], 'de novo')  # estorno duplicado bloqueado
+
+    def test_estorno_perda_devolve_lote(self):
+        conn = db.get_conn()
+        try:
+            conn.execute('UPDATE produtos SET perecivel=1 WHERE id=?', (self.p2,))
+            conn.commit()
+        finally:
+            conn.close()
+        lote = val.registrar_lote(self.p2, 5, (date.today() - timedelta(days=1)).isoformat())
+        p = op.registrar_perda([{'produto_id': self.p2, 'quantidade': 3, 'lote_id': lote}], 'Validade vencida')
+        self.assertEqual(g.consultar('SELECT quantidade FROM lotes_validade WHERE id=?', (lote,))[0]['quantidade'], 2)
+        op.estornar_perda(p['id'], 'Era aproveitável')
+        self.assertEqual(g.consultar('SELECT quantidade FROM lotes_validade WHERE id=?', (lote,))[0]['quantidade'], 5)
+        self.assertEqual(g.resultado_gerencial(self.hoje, self.hoje)['perdas'], 0)
+
+    def test_falha_no_segundo_item_reverte_tudo(self):
+        # Segundo item sem saldo: a transação inteira (cabeçalho, itens, estoque) volta.
+        with self.assertRaises(op.ErroOperacao):
+            op.registrar_consumo_interno(
+                [{'produto_id': self.p2, 'quantidade': 1}, {'produto_id': self.p1, 'quantidade': 99999}], 'Limpeza')
+        self.assertEqual(g.consultar('SELECT COUNT(*) n FROM consumo_interno')[0]['n'], 0)
+        self.assertEqual(op.obter_produto(self.p2)['quantidade_estoque'], 100)
+
+
 class BalancaTest(unittest.TestCase):
     def test_protocolos_toledo_8217(self):
         from balanca import LeitorBalanca as L

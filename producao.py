@@ -210,12 +210,12 @@ def relatorio_diario_produto(produto_id, ano, mes):
         _por_dia(
             '''SELECT date(pe.data_hora) AS dia, COALESCE(SUM(ip.quantidade), 0) AS qtd
                FROM itens_perda ip JOIN perdas pe ON pe.id = ip.perda_id
-               WHERE ip.produto_id = ? AND substr(pe.data_hora, 1, 7) = ?
+               WHERE ip.produto_id = ? AND substr(pe.data_hora, 1, 7) = ? AND pe.estornado = 0
                GROUP BY date(pe.data_hora)''', 'perdido')
         _por_dia(
             '''SELECT date(ci.data_hora) AS dia, COALESCE(SUM(ici.quantidade), 0) AS qtd
                FROM itens_consumo_interno ici JOIN consumo_interno ci ON ci.id = ici.consumo_id
-               WHERE ici.produto_id = ? AND substr(ci.data_hora, 1, 7) = ?
+               WHERE ici.produto_id = ? AND substr(ci.data_hora, 1, 7) = ? AND ci.estornado = 0
                GROUP BY date(ci.data_hora)''', 'consumido')
 
         linhas = []

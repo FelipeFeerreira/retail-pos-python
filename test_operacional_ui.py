@@ -70,6 +70,16 @@ def main():
         assert tops, 'diálogo de produção não abriu'
         tops[-1].destroy()
 
+        # Painel gerencial: linhas do resultado e bloco de caixa preenchidos.
+        root._atualizar_financeiro()
+        root.update()
+        assert root.dre_tree.get_children(), 'painel do resultado não foi preenchido'
+        assert root.caixa_tree.get_children(), 'bloco de caixa não foi preenchido'
+        hoje = date.today().isoformat()
+        esperado = g.resultado_gerencial(hoje, hoje)['resultado_apos_retiradas']
+        linha_final = root.dre_tree.item(root.dre_tree.get_children()[-1], 'values')
+        assert 'RETIRADAS' in str(linha_final[0]).upper(), 'última linha deveria ser o resultado após retiradas'
+
         root.destroy()
         print('OK: perda por lote (estoque/lote/rastreio/histórico) e diálogo de produção funcionam.')
 

@@ -410,23 +410,15 @@ def consumo_cliente(cliente_id, ano_mes=None):
 # do painel), pra separar do que é vendido pro cliente e mostrar quanto em R$ (a preço de
 # custo) a casa consumiu, com os itens usados em cada registro.
 
-MOTIVOS_CONSUMO = ['Limpeza', 'Lanches da equipe', 'Embalagens e insumos operacionais (sacola, saco, filme)', 'Consumo pessoal/família', 'Outro']
+MOTIVOS_CONSUMO = g.MOTIVOS_CONSUMO
 
-# Classificação gerencial do consumo interno: separa o que é custo de operação
-# da loja, o que é alimentação da equipe e o que é retirada pessoal/família.
-GRUPOS_CONSUMO = {
-    'Limpeza': 'operacional',
-    'Embalagens e insumos operacionais (sacola, saco, filme)': 'operacional',
-    'Lanches da equipe': 'equipe',
-    'Consumo pessoal/família': 'pessoal',
-    'Outro': 'outro',
-}
-NOMES_GRUPO_CONSUMO = {'operacional': 'Operacional', 'equipe': 'Equipe',
-                       'pessoal': 'Pessoal/família', 'outro': 'Outro'}
+# Classificação gerencial do consumo (fonte única em gestao.py).
+GRUPOS_CONSUMO = g.GRUPOS_CONSUMO
+NOMES_GRUPO_CONSUMO = g.NOMES_GRUPO_CONSUMO
 
 
 def grupo_consumo(motivo):
-    return GRUPOS_CONSUMO.get(motivo, 'outro')
+    return g.grupo_consumo(motivo)
 
 def registrar_consumo_interno(itens,motivo='',observacao='',responsavel=None,centro_custo='',chave=None):
     try:
@@ -460,7 +452,7 @@ def resumo_consumo_interno():
     conn=db.get_conn()
     try:
         def resumo(ini,fim):
-            r=conn.execute('SELECT COUNT(*) n,COALESCE(SUM(valor_total),0) total FROM consumo_interno WHERE date(data_hora) BETWEEN ? AND ?',(ini,fim)).fetchone()
+            r=conn.execute('SELECT COUNT(*) n,COALESCE(SUM(valor_total),0) total FROM consumo_interno WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ?',(ini,fim)).fetchone()
             return {'numero':r['n'],'valor_total':round(r['total'],2)}
         return {'dia':resumo(hoje_iso,hoje_iso),'semana':resumo(inicio_semana.isoformat(),hoje_iso),'mes':resumo(inicio_mes.isoformat(),hoje_iso)}
     finally: conn.close()
@@ -476,7 +468,7 @@ def resumo_consumo_por_motivo(inicio=None, fim=None):
         cond = (' AND ' + ' AND '.join(clausulas)) if clausulas else ''
         rows = conn.execute(
             f'''SELECT COALESCE(NULLIF(TRIM(motivo),''),'(sem motivo)') motivo, COUNT(*) n, COALESCE(SUM(valor_total),0) total
-                FROM consumo_interno WHERE 1=1{cond} GROUP BY motivo ORDER BY total DESC''', params).fetchall()
+                FROM consumo_interno WHERE estornado=0{cond} GROUP BY motivo ORDER BY total DESC''', params).fetchall()
         return [dict(r) for r in rows]
     finally: conn.close()
 
@@ -489,6 +481,20 @@ MOTIVOS_PERDA = ['Validade vencida', 'Estragado/danificado', 'Quebra/avaria', 'F
 def registrar_perda(itens,motivo='',observacao='',responsavel=None,chave=None):
     try:
         return g.registrar_baixa(itens,motivo,observacao,True,responsavel,chave=chave)
+    except g.ErroGestao as exc:
+        raise ErroOperacao(str(exc)) from exc
+
+
+def estornar_consumo_interno(consumo_id, motivo):
+    try:
+        return g.estornar_baixa(consumo_id, motivo, perda=False)
+    except g.ErroGestao as exc:
+        raise ErroOperacao(str(exc)) from exc
+
+
+def estornar_perda(perda_id, motivo):
+    try:
+        return g.estornar_baixa(perda_id, motivo, perda=True)
     except g.ErroGestao as exc:
         raise ErroOperacao(str(exc)) from exc
 
@@ -520,7 +526,7 @@ def total_perdas_periodo(inicio=None, fim=None):
         if inicio: clausulas.append('date(data_hora) >= ?'); params.append(inicio)
         if fim: clausulas.append('date(data_hora) <= ?'); params.append(fim)
         cond = (' AND ' + ' AND '.join(clausulas)) if clausulas else ''
-        r = conn.execute(f'SELECT COUNT(*) n, COALESCE(SUM(valor_total),0) total FROM perdas WHERE 1=1{cond}', params).fetchone()
+        r = conn.execute(f'SELECT COUNT(*) n, COALESCE(SUM(valor_total),0) total FROM perdas WHERE estornado=0{cond}', params).fetchone()
         return {'numero': r['n'], 'valor_total': round(r['total'], 2)}
     finally: conn.close()
 
@@ -531,7 +537,7 @@ def resumo_perdas():
     conn=db.get_conn()
     try:
         def resumo(ini,fim):
-            r=conn.execute('SELECT COUNT(*) n,COALESCE(SUM(valor_total),0) total FROM perdas WHERE date(data_hora) BETWEEN ? AND ?',(ini,fim)).fetchone()
+            r=conn.execute('SELECT COUNT(*) n,COALESCE(SUM(valor_total),0) total FROM perdas WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ?',(ini,fim)).fetchone()
             return {'numero':r['n'],'valor_total':round(r['total'],2)}
         return {'dia':resumo(hoje_iso,hoje_iso),'semana':resumo(inicio_semana.isoformat(),hoje_iso),'mes':resumo(inicio_mes.isoformat(),hoje_iso)}
     finally: conn.close()
@@ -545,6 +551,6 @@ def resumo_perdas_por_motivo(inicio=None, fim=None):
         cond = (' AND ' + ' AND '.join(clausulas)) if clausulas else ''
         rows = conn.execute(
             f'''SELECT motivo, COUNT(*) n, COALESCE(SUM(valor_total),0) total
-                FROM perdas WHERE 1=1{cond} GROUP BY motivo ORDER BY total DESC''', params).fetchall()
+                FROM perdas WHERE estornado=0{cond} GROUP BY motivo ORDER BY total DESC''', params).fetchall()
         return [dict(r) for r in rows]
     finally: conn.close()

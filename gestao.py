@@ -36,6 +36,35 @@ PERMISSOES = {
 # juros/multa por dia de atraso. É o padrão para clientes sem política própria.
 POLITICA_PADRAO = {'limite_credito': 200, 'prazo_dias': 15, 'juros_dia': 1, 'multa_dia': 1}
 
+# Categorias de conta a pagar. As de despesa entram no resultado por
+# competência; as demais (mercadoria/investimento) não são despesa operacional
+# — mercadoria entra no estoque e vira CMV/consumo/perda; investimento é ativo.
+CATEGORIAS_CONTA = ['Aluguel', 'Energia', 'Água', 'Internet', 'Telefone', 'Salários',
+                    'Manutenção', 'Serviços', 'Impostos e taxas', 'Despesas fixas',
+                    'Despesas variáveis', 'Mercadoria para revenda', 'Investimento']
+CATEGORIAS_NAO_DESPESA = ('Mercadoria para revenda', 'Investimento')
+# Categorias de movimento financeiro que NÃO são receita/despesa operacional.
+CATEGORIAS_MOVIMENTO_NEUTRAS = ('Transferência', 'Aporte', 'Retirada')
+
+# Motivos de consumo interno e sua classificação gerencial: separa operação da
+# loja, alimentação da equipe e retirada pessoal/família (não é despesa).
+MOTIVOS_CONSUMO = ['Limpeza', 'Lanches da equipe',
+                   'Embalagens e insumos operacionais (sacola, saco, filme)',
+                   'Consumo pessoal/família', 'Outro']
+GRUPOS_CONSUMO = {
+    'Limpeza': 'operacional',
+    'Embalagens e insumos operacionais (sacola, saco, filme)': 'operacional',
+    'Lanches da equipe': 'equipe',
+    'Consumo pessoal/família': 'pessoal',
+    'Outro': 'outro',
+}
+NOMES_GRUPO_CONSUMO = {'operacional': 'Operacional', 'equipe': 'Equipe',
+                       'pessoal': 'Pessoal/família', 'outro': 'Outro'}
+
+
+def grupo_consumo(motivo):
+    return GRUPOS_CONSUMO.get(motivo, 'outro')
+
 
 def permitir(acao):
     if acao not in PERMISSOES.get(PERFIL, set()):
@@ -140,8 +169,8 @@ def migrar(conn):
                              'chave_operacao': 'TEXT', 'estornado': 'INTEGER NOT NULL DEFAULT 0', 'movimento_id': 'INTEGER',
                              'taxa_centavos': 'INTEGER NOT NULL DEFAULT 0',
                              'usuario': "TEXT NOT NULL DEFAULT 'Legado'"},
-        'consumo_interno': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'centro_custo': "TEXT NOT NULL DEFAULT ''", 'chave': 'TEXT'},
-        'perdas': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'chave': 'TEXT'},
+        'consumo_interno': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'centro_custo': "TEXT NOT NULL DEFAULT ''", 'chave': 'TEXT', 'estornado': 'INTEGER NOT NULL DEFAULT 0'},
+        'perdas': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'chave': 'TEXT', 'estornado': 'INTEGER NOT NULL DEFAULT 0'},
         'producoes': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'validade': 'TEXT', 'rendimento_real': 'REAL', 'chave': 'TEXT'},
     }
     for tabela, colunas in campos.items():
@@ -589,8 +618,8 @@ def resumo_financeiro(inicio,fim):
         vendas=soma('SELECT SUM(valor_total) FROM vendas WHERE cancelada=0 AND date(data_hora) BETWEEN ? AND ?')
         cmv=soma('SELECT SUM(i.quantidade*i.custo_unitario) FROM itens_venda i JOIN vendas v ON v.id=i.venda_id WHERE v.cancelada=0 AND date(v.data_hora) BETWEEN ? AND ?')
         sem_custo=soma('SELECT COUNT(*) FROM itens_venda i JOIN vendas v ON v.id=i.venda_id WHERE v.cancelada=0 AND i.custo_unitario IS NULL AND date(v.data_hora) BETWEEN ? AND ?')
-        consumo=soma('SELECT SUM(valor_total) FROM consumo_interno WHERE date(data_hora) BETWEEN ? AND ?')
-        perdas=soma('SELECT SUM(valor_total) FROM perdas WHERE date(data_hora) BETWEEN ? AND ?')
+        consumo=soma('SELECT SUM(valor_total) FROM consumo_interno WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ?')
+        perdas=soma('SELECT SUM(valor_total) FROM perdas WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ?')
         despesas=soma("SELECT SUM(valor_centavos)/100.0 FROM contas_pagar WHERE cancelada=0 AND categoria NOT IN ('Mercadoria para revenda','Investimento') AND competencia BETWEEN ? AND ?")
         taxas=soma('SELECT SUM(taxa_paga) FROM vendas WHERE cancelada=0 AND date(data_hora) BETWEEN ? AND ?')
         # Taxas de cartão efetivas substituem as estimadas para as vendas novas.
@@ -608,6 +637,137 @@ def resumo_financeiro(inicio,fim):
                     resultado=vendas-cmv-consumo-perdas-despesas-taxas-taxas_fiado+encargos_recebidos-encargos_pagos+outras_receitas,
                     margem=(vendas-cmv)/vendas*100 if vendas else 0,ticket=vendas/n if n else 0,sem_custo=sem_custo)
     finally: c.close()
+
+
+def resultado_gerencial(inicio, fim):
+    """Resultado líquido gerencial por competência, em reais.
+
+    Estrutura: vendas líquidas - CMV - taxas - perdas - consumo operacional
+    - consumo da equipe - consumo a classificar - despesas de competência
+    + outras receitas - outras despesas = resultado líquido gerencial.
+    Depois: - retiradas pessoais/família = resultado após retiradas.
+
+    Consumo e perdas usam o custo HISTÓRICO registrado no lançamento (nunca o
+    preço de venda nem o custo atual). Vendas canceladas e baixas estornadas
+    ficam de fora. 'parcial' indica que faltam custos e o valor não é exato."""
+    inicio = data_iso(inicio); fim = data_iso(fim)
+    if inicio > fim: raise ErroGestao('Período inválido.')
+    c = db.get_conn()
+    try:
+        def soma(sql): return c.execute(sql, (inicio, fim)).fetchone()[0] or 0
+        vendas = soma("SELECT SUM(valor_total) FROM vendas WHERE cancelada=0 AND date(data_hora) BETWEEN ? AND ?")
+        descontos = soma("SELECT SUM(desconto) FROM vendas WHERE cancelada=0 AND date(data_hora) BETWEEN ? AND ?")
+        cmv = soma("SELECT SUM(i.quantidade*i.custo_unitario) FROM itens_venda i JOIN vendas v ON v.id=i.venda_id WHERE v.cancelada=0 AND date(v.data_hora) BETWEEN ? AND ?")
+        sem_custo_venda = soma("SELECT COUNT(*) FROM itens_venda i JOIN vendas v ON v.id=i.venda_id WHERE v.cancelada=0 AND i.custo_unitario IS NULL AND date(v.data_hora) BETWEEN ? AND ?")
+        taxas = soma("SELECT SUM(taxa_paga) FROM vendas WHERE cancelada=0 AND date(data_hora) BETWEEN ? AND ?")
+        taxas_cartao = soma("SELECT SUM(r.taxa_centavos)/100.0 FROM recebiveis_cartao r JOIN vendas v ON r.origem='venda' AND r.referencia=CAST(v.id AS TEXT) WHERE v.cancelada=0 AND date(v.data_hora) BETWEEN ? AND ?")
+        taxas_estimadas = soma("SELECT SUM(v.taxa_paga) FROM vendas v WHERE v.cancelada=0 AND EXISTS(SELECT 1 FROM recebiveis_cartao r WHERE r.origem='venda' AND r.referencia=CAST(v.id AS TEXT)) AND date(v.data_hora) BETWEEN ? AND ?")
+        taxas += taxas_cartao - taxas_estimadas
+        taxas_fiado = soma("SELECT SUM(r.taxa_centavos)/100.0 FROM recebiveis_cartao r JOIN pagamentos_fiado p ON r.origem='fiado' AND r.referencia=CAST(p.id AS TEXT) WHERE p.estornado=0 AND date(p.data_hora) BETWEEN ? AND ?")
+        taxas += taxas_fiado
+        perdas = soma("SELECT SUM(valor_total) FROM perdas WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ?")
+        sem_custo_perda = soma("SELECT COUNT(*) FROM itens_perda ip JOIN perdas p ON p.id=ip.perda_id WHERE p.estornado=0 AND ip.preco_custo_unitario<=0 AND date(p.data_hora) BETWEEN ? AND ?")
+        grupos = {k: 0.0 for k in ('operacional', 'equipe', 'pessoal', 'outro')}
+        for r in c.execute("SELECT motivo, COALESCE(SUM(valor_total),0) total FROM consumo_interno WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ? GROUP BY motivo", (inicio, fim)).fetchall():
+            grupos[grupo_consumo(r['motivo'])] += r['total'] or 0
+        sem_custo_consumo = soma("SELECT COUNT(*) FROM itens_consumo_interno ici JOIN consumo_interno ci ON ci.id=ici.consumo_id WHERE ci.estornado=0 AND ici.preco_custo_unitario<=0 AND date(ci.data_hora) BETWEEN ? AND ?")
+        despesas = soma("SELECT SUM(valor_centavos)/100.0 FROM contas_pagar WHERE cancelada=0 AND categoria NOT IN ('Mercadoria para revenda','Investimento') AND competencia BETWEEN ? AND ?")
+        outras_receitas = soma("SELECT SUM(valor_centavos)/100.0 FROM movimentos_financeiros WHERE categoria='Outras receitas' AND data BETWEEN ? AND ?")
+        encargos_recebidos = soma("SELECT SUM(encargos_centavos)/100.0 FROM pagamentos_fiado WHERE tipo='recebimento' AND estornado=0 AND date(data_hora) BETWEEN ? AND ?")
+        outras_receitas += encargos_recebidos
+        # 'Outras despesas' só conta quando é lançamento manual (não o pagamento
+        # de uma conta, que já entrou em despesas_competencia — evita duplicar).
+        outras_despesas = soma("SELECT SUM(-valor_centavos)/100.0 FROM movimentos_financeiros WHERE categoria='Outras despesas' AND origem!='conta_pagar' AND valor_centavos<0 AND data BETWEEN ? AND ?")
+        encargos_pagos = soma("SELECT SUM(encargos_centavos-desconto_centavos)/100.0 FROM pagamentos_contas WHERE estornado=0 AND data BETWEEN ? AND ?")
+        outras_despesas += encargos_pagos
+        resultado = (vendas - cmv - taxas - perdas - grupos['operacional'] - grupos['equipe']
+                     - grupos['outro'] - despesas + outras_receitas - outras_despesas)
+        pendencias = []
+        if sem_custo_venda: pendencias.append(f'{sem_custo_venda} item(ns) de venda sem custo histórico (CMV incompleto)')
+        if sem_custo_consumo: pendencias.append(f'{sem_custo_consumo} item(ns) de consumo sem custo conhecido')
+        if sem_custo_perda: pendencias.append(f'{sem_custo_perda} item(ns) de perda sem custo conhecido')
+        return {
+            'inicio': inicio, 'fim': fim,
+            'vendas_liquidas': round(vendas, 2), 'descontos': round(descontos, 2),
+            'cmv': round(cmv, 2), 'margem_bruta': round(vendas - cmv, 2),
+            'margem_pct': round((vendas - cmv) / vendas * 100, 1) if vendas else 0.0,
+            'taxas': round(taxas, 2), 'perdas': round(perdas, 2),
+            'consumo_operacional': round(grupos['operacional'], 2),
+            'consumo_equipe': round(grupos['equipe'], 2),
+            'consumo_outro': round(grupos['outro'], 2),
+            'retiradas_pessoais': round(grupos['pessoal'], 2),
+            'despesas_competencia': round(despesas, 2),
+            'outras_receitas': round(outras_receitas, 2),
+            'outras_despesas': round(outras_despesas, 2),
+            'resultado_liquido': round(resultado, 2),
+            'resultado_apos_retiradas': round(resultado - grupos['pessoal'], 2),
+            'parcial': bool(pendencias), 'pendencias': pendencias,
+        }
+    finally:
+        c.close()
+
+
+def painel_financeiro(inicio, fim):
+    """Bloco 'caixa não é lucro': saldos registrados e movimento efetivo do
+    período, separados do resultado gerencial."""
+    inicio = data_iso(inicio); fim = data_iso(fim)
+    if inicio > fim: raise ErroGestao('Período inválido.')
+    c = db.get_conn()
+    try:
+        def um(sql, params=()):
+            r = c.execute(sql, params).fetchone()
+            return (r[0] if r else 0) or 0
+        contas = c.execute("""SELECT c.id,c.nome,c.tipo,
+                     c.saldo_inicial_centavos+COALESCE(SUM(m.valor_centavos),0) saldo_centavos
+                     FROM contas_financeiras c LEFT JOIN movimentos_financeiros m ON m.conta_id=c.id
+                     GROUP BY c.id ORDER BY c.id""").fetchall()
+        dinheiro = sum(r['saldo_centavos'] for r in contas if r['tipo'] == 'dinheiro') / 100
+        banco = sum(r['saldo_centavos'] for r in contas if r['tipo'] != 'dinheiro') / 100
+        cartao_receber = um("SELECT SUM(bruto_centavos-taxa_centavos) FROM recebiveis_cartao WHERE liquidado IS NULL") / 100
+        fiado_receber = um("SELECT SUM(valor_centavos-recebido_centavos) FROM titulos_receber WHERE cancelado=0") / 100
+        contas_pagar = um("""SELECT SUM(t.valor_centavos - COALESCE((SELECT SUM(p.principal_centavos)
+                     FROM pagamentos_contas p WHERE p.titulo_id=t.id AND p.estornado=0),0))
+                     FROM contas_pagar t WHERE t.cancelada=0""") / 100
+        entradas = um("SELECT SUM(valor_centavos) FROM movimentos_financeiros WHERE valor_centavos>0 AND categoria NOT IN ('Transferência','Aporte','Retirada') AND data BETWEEN ? AND ?", (inicio, fim)) / 100
+        saidas = um("SELECT -SUM(valor_centavos) FROM movimentos_financeiros WHERE valor_centavos<0 AND categoria NOT IN ('Transferência','Aporte','Retirada') AND data BETWEEN ? AND ?", (inicio, fim)) / 100
+        return {'contas': [dict(r) for r in contas],
+                'dinheiro': round(dinheiro, 2), 'banco': round(banco, 2),
+                'cartao_receber': round(cartao_receber, 2), 'fiado_receber': round(fiado_receber, 2),
+                'contas_pagar': round(contas_pagar, 2),
+                'entradas': round(entradas, 2), 'saidas': round(saidas, 2),
+                'fluxo': round(entradas - saidas, 2)}
+    finally:
+        c.close()
+
+
+def lancamentos_componente(componente, inicio, fim):
+    """Lista os lançamentos que compõem um componente do resultado (drill-down)."""
+    inicio = data_iso(inicio); fim = data_iso(fim)
+    c = db.get_conn()
+    try:
+        if componente == 'vendas':
+            rows = c.execute("SELECT v.id,v.data_hora,c.nome cliente,v.valor_total FROM vendas v LEFT JOIN clientes c ON c.id=v.cliente_id WHERE v.cancelada=0 AND date(v.data_hora) BETWEEN ? AND ? ORDER BY v.data_hora", (inicio, fim)).fetchall()
+            return [{'ref': f"Venda #{r['id']}", 'data': r['data_hora'], 'descricao': r['cliente'] or 'Consumidor', 'valor': round(r['valor_total'], 2)} for r in rows]
+        if componente == 'cmv':
+            rows = c.execute("SELECT v.id,v.data_hora,p.nome,i.quantidade,i.custo_unitario FROM itens_venda i JOIN vendas v ON v.id=i.venda_id JOIN produtos p ON p.id=i.produto_id WHERE v.cancelada=0 AND date(v.data_hora) BETWEEN ? AND ? ORDER BY v.data_hora", (inicio, fim)).fetchall()
+            return [{'ref': f"Venda #{r['id']}", 'data': r['data_hora'], 'descricao': r['nome'], 'valor': round((r['custo_unitario'] or 0) * r['quantidade'], 2)} for r in rows]
+        if componente in ('consumo_operacional', 'consumo_equipe', 'consumo_outro', 'retiradas_pessoais'):
+            alvo = {'consumo_operacional': 'operacional', 'consumo_equipe': 'equipe',
+                    'consumo_outro': 'outro', 'retiradas_pessoais': 'pessoal'}[componente]
+            rows = c.execute("SELECT id,data_hora,motivo,valor_total FROM consumo_interno WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ? ORDER BY data_hora", (inicio, fim)).fetchall()
+            return [{'ref': f"Consumo #{r['id']}", 'data': r['data_hora'], 'descricao': r['motivo'] or '—', 'valor': round(r['valor_total'], 2)} for r in rows if grupo_consumo(r['motivo']) == alvo]
+        if componente == 'perdas':
+            rows = c.execute("SELECT id,data_hora,motivo,valor_total FROM perdas WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ? ORDER BY data_hora", (inicio, fim)).fetchall()
+            return [{'ref': f"Perda #{r['id']}", 'data': r['data_hora'], 'descricao': r['motivo'] or '—', 'valor': round(r['valor_total'], 2)} for r in rows]
+        if componente == 'despesas_competencia':
+            rows = c.execute("SELECT t.id,t.descricao,t.competencia,cc.nome credor,t.valor_centavos/100.0 valor FROM contas_pagar t JOIN credores cc ON cc.id=t.credor_id WHERE t.cancelada=0 AND t.categoria NOT IN ('Mercadoria para revenda','Investimento') AND t.competencia BETWEEN ? AND ? ORDER BY t.competencia", (inicio, fim)).fetchall()
+            return [{'ref': f"Conta #{r['id']}", 'data': r['competencia'], 'descricao': f"{r['credor']} — {r['descricao']}", 'valor': round(r['valor'], 2)} for r in rows]
+        if componente == 'taxas':
+            rows = c.execute("SELECT v.id,v.data_hora,v.taxa_paga FROM vendas v WHERE v.cancelada=0 AND v.taxa_paga>0 AND date(v.data_hora) BETWEEN ? AND ? ORDER BY v.data_hora", (inicio, fim)).fetchall()
+            return [{'ref': f"Venda #{r['id']}", 'data': r['data_hora'], 'descricao': 'Taxa de venda', 'valor': round(r['taxa_paga'], 2)} for r in rows]
+        return []
+    finally:
+        c.close()
 
 
 def _hash_senha(senha, salt):
@@ -802,6 +962,30 @@ def estornar_pagamento(pid,motivo):
         estornar_movimento(c,p['movimento_id'],motivo)
         c.execute('UPDATE pagamentos_contas SET estornado=1 WHERE id=?',(pid,))
         auditar(c,'estornar','pagamento',pid,{'motivo':motivo})
+
+
+def estornar_baixa(baixa_id,motivo,perda=False):
+    """Estorno auditado de consumo interno ou perda: devolve estoque e lotes,
+    preserva o lançamento original (marcado como estornado) e impede estorno
+    duplicado. Não apaga histórico."""
+    permitir('estornar')
+    if not motivo.strip(): raise ErroGestao('Justifique o estorno.')
+    tabela='perdas' if perda else 'consumo_interno'
+    item_tab,col=('itens_perda','perda_id') if perda else ('itens_consumo_interno','consumo_id')
+    origem='Perda' if perda else 'Consumo interno'
+    with transacao() as c:
+        r=c.execute(f'SELECT * FROM {tabela} WHERE id=?',(baixa_id,)).fetchone()
+        if not r: raise ErroGestao('Lançamento não encontrado.')
+        if r['estornado']: raise ErroGestao('Lançamento já estornado.')
+        for it in c.execute(f'SELECT * FROM {item_tab} WHERE {col}=?',(baixa_id,)).fetchall():
+            c.execute('UPDATE produtos SET quantidade_estoque=round(quantidade_estoque+?,3) WHERE id=?',(it['quantidade'],it['produto_id']))
+            c.execute("INSERT INTO movimentacoes_estoque(produto_id,tipo,quantidade,observacao) VALUES(?,'entrada',?,?)",
+                      (it['produto_id'],it['quantidade'],f'Estorno {"perda" if perda else "consumo"} #{baixa_id}: {motivo}'))
+        for l in c.execute('SELECT lote_id,quantidade FROM baixas_lotes WHERE origem=? AND referencia=?',(origem,str(baixa_id))).fetchall():
+            c.execute('UPDATE lotes_validade SET quantidade=round(quantidade+?,3) WHERE id=?',(l['quantidade'],l['lote_id']))
+        c.execute(f'UPDATE {tabela} SET estornado=1 WHERE id=?',(baixa_id,))
+        auditar(c,'estornar',tabela,baixa_id,{'motivo':motivo})
+        return baixa_id
 
 
 def cancelar_venda(vid,motivo):

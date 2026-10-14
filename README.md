@@ -44,21 +44,55 @@ The application initializes its SQLite database on first run. On the first launc
 - **NF-e import:** the app never fabricates expiration dates or payment terms. When the invoice does not carry the due date, payment condition or the expiration of perishables, the preview asks for them explicitly and blocks the import until they are provided. Duplicate invoices are detected and ignored, and a failed import does not leave orphan product registrations.
 - **Single instance:** a cross-platform lock (Windows `msvcrt` / Unix `flock`) prevents two copies from opening the same SQLite file.
 
-## Roteiro do operador — consumo, perdas e produção
+## Roteiro do operador
 
-**Consumo interno** (o que a própria casa/equipe usa, sai pelo preço de custo, não é venda):
-1. Aba **Consumo interno** → busque o produto por nome/código e informe a quantidade.
-2. Confira a lista e escolha o **motivo** (limpeza, equipe, pessoal/família, operacional).
-3. **Registrar consumo**. Se o estoque for insuficiente, o sistema avisa a causa — registre a **entrada/inventário** primeiro (não force saldo negativo).
+**1. Compra e entrada de mercadoria**
+- **Arquivo → Importar nota fiscal (NF-e)** para nota de fornecedor, ou **Receber mercadoria** (Ferramentas) para digitar. Ambos fazem prévia, pedem confirmação e fazem backup antes de gravar. A mercadoria entra no **estoque** e o valor vira **conta a pagar** (categoria "Mercadoria para revenda") — não é despesa: o custo só é reconhecido quando vender/consumir/perder (CMV).
 
-**Perdas** (venceu, estragou, quebrou — prejuízo puro):
-1. Aba **Perdas** → adicione o produto e a quantidade. Se o item tiver lotes, **escolha o lote perdido** (há também o atalho **"Registrar perda"** na aba Lotes e validade, que baixa o lote selecionado).
+**2. Consumo interno** (uso operacional/equipe — sai pelo preço de custo, não é venda):
+1. Aba **Consumo interno** → busque o produto por nome/código e informe a quantidade (aceita vírgula).
+2. Confira a lista e escolha o **motivo** (limpeza/embalagens = operacional, "Lanches da equipe" = equipe, "Consumo pessoal/família" = retirada).
+3. **Registrar consumo**. A tela mostra a **prévia do custo**; se o custo for desconhecido, avisa e marca o total como parcial. Falta de estoque mostra a causa (registre entrada/inventário primeiro).
+
+**3. Retirada familiar** — mesma tela do consumo, motivo **"Consumo pessoal/família"**. Entra como **retirada** (não é despesa operacional) e aparece separada no resultado.
+
+**4. Perda** (venceu, estragou, quebrou — prejuízo puro):
+1. Aba **Perdas** → adicione o produto e a quantidade. Se o item tiver lotes, **escolha o lote perdido** (ou use o atalho **"Registrar perda"** na aba Lotes e validade).
 2. Informe o **motivo** e confirme. Lote vencido pode ser baixado como perda (com motivo); para consumo/produção/venda, lote vencido é **bloqueado** mesmo havendo outro lote válido.
 
-**Produção** (transforma insumos em um produto que entra no estoque):
+**5. Produção** (transforma insumos em um produto que entra no estoque):
 1. Cadastre a **receita** (produto final, rendimento e insumos) — selecione cada insumo e produto final na lista de sugestões (nome + unidade + código).
-2. **Registrar produção** → informe quantas vezes fez a receita, o rendimento real (se diferente) e a validade do produto final.
-3. Tudo é gravado numa **única transação**: se faltar um insumo, nada é alterado. Duplo clique não gera duas produções (idempotência por chave).
+2. **Registrar produção** → a tela mostra a **prévia** (insumos necessários × disponíveis, custo, rendimento previsto/real, validade). Informe quantas vezes fez a receita, o rendimento real e a validade.
+3. Tudo é gravado numa **única transação**: se faltar um insumo, nada é alterado. O custo dos insumos vira o custo do produto final **uma única vez** (não é lançado também como consumo). Duplo clique não gera duas produções.
+
+**6. Conta da loja e pagamento**
+- **Financeiro → Contas a pagar → Nova conta**: credor, descrição, categoria (aluguel, energia, água, internet, salários, manutenção, serviços...), valor, **competência** (mês em que conta no resultado), vencimento e documento.
+- **Registrar pagamento**: escolha a conta financeira e o valor (aceita pagamento parcial). A despesa conta no **resultado pela competência** (valor cheio) e no **caixa quando é paga** — pagamento parcial não duplica a despesa.
+- Mercadoria para revenda e Investimento **não** são despesa operacional. Aportes, retiradas e transferências **não** são receita nem despesa.
+
+**7. Consulta do resultado e do saldo financeiro**
+- **Financeiro → DRE gerencial**: painel por competência com filtro **Hoje / 7 / 30 dias / período personalizado** (campos de data no topo). Estrutura:
+
+  ```
+  Vendas líquidas de descontos e cancelamentos
+  − CMV histórico das mercadorias vendidas
+  = Margem bruta
+  − taxas de cartão e outros meios
+  − perdas (a preço de custo)
+  − consumo operacional
+  − consumo da equipe
+  − consumo a classificar
+  − despesas da loja por competência
+  + outras receitas  − outras despesas
+  = RESULTADO LÍQUIDO GERENCIAL
+  − retiradas pessoais/familiares (a preço de custo)
+  = RESULTADO APÓS RETIRADAS PESSOAIS/FAMILIARES
+  ```
+
+  Selecione uma linha e clique em **Ver lançamentos** (ou dê duplo clique) para abrir os registros que compõem o valor. Se faltar custo em algum item, o painel avisa **"RESULTADO PARCIAL"** e lista as pendências.
+- Ao lado, o bloco **"Caixa não é lucro"**: dinheiro em caixa, saldo bancário registrado, cartão a receber, fiado a receber, contas a pagar em aberto e o fluxo efetivo do período. Fiado é resultado da venda, mas não é dinheiro recebido; o recebimento depois não é uma segunda venda.
+
+**Estorno de consumo/perda:** no histórico de **Consumo interno** ou **Perdas**, abra o lançamento (duplo clique) e use **Estornar lançamento** com o motivo. O original é preservado (marcado como estornado), o estoque e os lotes voltam e o indicador é corrigido. Estorno duplicado é bloqueado.
 
 **Saneamento de estoque negativo** (conferência, sem inventar custo):
 - Estoque negativo é erro de registro. Ao repor (compra, produção ou ajuste), o **custo médio** só é ponderado quando o saldo anterior é positivo; com saldo negativo/zero, assume o **custo da própria entrada** — nunca divide por zero nem inventa custo.

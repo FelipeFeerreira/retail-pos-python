@@ -110,7 +110,8 @@ def historico_fiado(cliente_id):
     conn = db.get_conn()
     try:
         vendas = conn.execute(
-            "SELECT id, data_hora, valor_total, desconto FROM vendas WHERE cliente_id = ? AND forma_pagamento = 'fiado' ORDER BY data_hora DESC",
+            "SELECT id, data_hora, valor_total, desconto, COALESCE(cancelada,0) cancelada "
+            "FROM vendas WHERE cliente_id = ? AND forma_pagamento = 'fiado' ORDER BY data_hora DESC",
             (cliente_id,),
         ).fetchall()
         pagamentos = conn.execute(

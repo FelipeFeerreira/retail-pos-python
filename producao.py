@@ -178,7 +178,12 @@ def relatorio_diario_produto(produto_id, ano, mes):
     Produção), vendido (Caixa), perdido (aba Perdas) e consumido internamente
     — pensado pro pão (ou qualquer produto feito e vendido no mesmo dia):
     'fizemos 125, vendemos 120' fica visível por dia do mês, não só o total.
-    Saldo = produzido - vendido - perdido - consumido (o que sobrou/faltou)."""
+
+    'saldo' aqui é o MOVIMENTO LÍQUIDO do dia (produzido - vendido - perdido
+    - consumido), NÃO o estoque físico final: compras, entradas por ajuste,
+    devoluções de venda cancelada e o saldo inicial do dia não entram nessa
+    conta. Vendas canceladas não contam como vendido. Para o estoque real,
+    consulte produtos.quantidade_estoque e as movimentações de estoque."""
     conn = db.get_conn()
     try:
         produto = conn.execute('SELECT id, nome, unidade FROM produtos WHERE id = ?', (produto_id,)).fetchone()
@@ -200,7 +205,7 @@ def relatorio_diario_produto(produto_id, ano, mes):
         _por_dia(
             '''SELECT date(v.data_hora) AS dia, COALESCE(SUM(iv.quantidade), 0) AS qtd
                FROM itens_venda iv JOIN vendas v ON v.id = iv.venda_id
-               WHERE iv.produto_id = ? AND substr(v.data_hora, 1, 7) = ?
+               WHERE iv.produto_id = ? AND substr(v.data_hora, 1, 7) = ? AND v.cancelada = 0
                GROUP BY date(v.data_hora)''', 'vendido')
         _por_dia(
             '''SELECT date(pe.data_hora) AS dia, COALESCE(SUM(ip.quantidade), 0) AS qtd

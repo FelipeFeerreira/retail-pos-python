@@ -2287,7 +2287,8 @@ class App(GestaoMixin, tk.Tk):
                 if ev['tipo'] == 'compra':
                     forma = 'fiado' if ev['forma_pagamento'] == 'fiado' else ev['forma_pagamento']
                     tag = 'fiado' if ev['forma_pagamento'] == 'fiado' else 'compra'
-                    rotulo = f"🛒 {quando} — {forma}"
+                    cancelada = ev.get('cancelada')
+                    rotulo = f"🛒 {quando} — {forma}" + ('  ·  CANCELADA (não conta no total)' if cancelada else '')
                     pai = tve.insert('', 'end', text=rotulo, tags=(tag,), values=(self._moeda(ev['valor']),), open=(i < 5))
                     for item in ev['itens']:
                         texto_item = f"   {item['nome']} ({self._formatq(item['quantidade'], item['unidade'])})"
@@ -2935,6 +2936,7 @@ class App(GestaoMixin, tk.Tk):
             self.qtd_consumo.insert(0, '1')
 
     def _adicionar_selecionado_consumo(self):
+        self._chave_consumo = None  # mudou o carrinho: nova tentativa, nova chave
         sel = self.tree_busca_consumo.selection()
         if not sel:
             messagebox.showinfo('Selecione um produto', 'Clique num produto da lista de busca primeiro.', parent=self)
@@ -3004,6 +3006,7 @@ class App(GestaoMixin, tk.Tk):
         self.lbl_total_consumo.config(text=self._moeda(total))
 
     def _alterar_qtd_consumo(self, delta):
+        self._chave_consumo = None
         sel = self.tree_consumo.selection()
         if not sel:
             return
@@ -3017,6 +3020,7 @@ class App(GestaoMixin, tk.Tk):
         self._render_carrinho_consumo(selecionar_idx=idx)
 
     def _remover_consumo_item(self):
+        self._chave_consumo = None
         sel = self.tree_consumo.selection()
         if sel:
             self.carrinho_consumo.pop(int(sel[0]))
@@ -3037,8 +3041,11 @@ class App(GestaoMixin, tk.Tk):
                 f"Baixar do estoque?"):
             return
         itens = [{'produto_id': i['produto_id'], 'quantidade': i['quantidade']} for i in self.carrinho_consumo]
+        chave = getattr(self, '_chave_consumo', None) or uuid.uuid4().hex
+        self._chave_consumo = chave
         try:
-            r = op.registrar_consumo_interno(itens, motivo, observacao)
+            r = op.registrar_consumo_interno(itens, motivo, observacao, chave=chave)
+            self._chave_consumo = None
             self.carrinho_consumo = []
             self._render_carrinho_consumo()
             self.entrada_obs_consumo.delete(0, 'end')
@@ -3319,6 +3326,7 @@ class App(GestaoMixin, tk.Tk):
             self.qtd_perda.insert(0, '1')
 
     def _adicionar_selecionado_perda(self):
+        self._chave_perda = None  # mudou o carrinho: nova tentativa, nova chave
         sel = self.tree_busca_perda.selection()
         if not sel:
             messagebox.showinfo('Selecione um produto', 'Clique num produto da lista de busca primeiro.', parent=self)
@@ -3388,6 +3396,7 @@ class App(GestaoMixin, tk.Tk):
         self.lbl_total_perda.config(text=self._moeda(total))
 
     def _alterar_qtd_perda(self, delta):
+        self._chave_perda = None
         sel = self.tree_perda.selection()
         if not sel:
             return
@@ -3401,6 +3410,7 @@ class App(GestaoMixin, tk.Tk):
         self._render_carrinho_perda(selecionar_idx=idx)
 
     def _remover_perda_item(self):
+        self._chave_perda = None
         sel = self.tree_perda.selection()
         if sel:
             self.carrinho_perda.pop(int(sel[0]))
@@ -3421,8 +3431,11 @@ class App(GestaoMixin, tk.Tk):
                 f"Baixar do estoque e registrar como perda?"):
             return
         itens = [{'produto_id': i['produto_id'], 'quantidade': i['quantidade']} for i in self.carrinho_perda]
+        chave = getattr(self, '_chave_perda', None) or uuid.uuid4().hex
+        self._chave_perda = chave
         try:
-            r = op.registrar_perda(itens, motivo, observacao)
+            r = op.registrar_perda(itens, motivo, observacao, chave=chave)
+            self._chave_perda = None
             self.carrinho_perda = []
             self._render_carrinho_perda()
             self.entrada_obs_perda.delete(0, 'end')
@@ -3534,6 +3547,13 @@ class App(GestaoMixin, tk.Tk):
             f"Custo total: {self._moeda(detalhe['custo_total'])}  ·  Custo por unidade: {self._moeda(detalhe['custo_unitario'])}\n\n"
             f"Insumos usados nessa produção ({detalhe['multiplicador']:g}x a receita):\n{linhas}")
 
+    def _sugestao_produto(self, p):
+        """Rótulo de sugestão mostrando nome, unidade e código — para o
+        operador não confundir produtos de nomes parecidos."""
+        codigo = p.get('codigo_barras') or p.get('sku') or ''
+        extra = f' · {codigo}' if codigo else ''
+        return f"{p['nome']} ({p.get('unidade', 'UN')}){extra}"
+
     def _modal_nova_receita(self, receita=None):
         dlg = tk.Toplevel(self)
         dlg.title('Editar receita' if receita else 'Nova receita')
@@ -3553,12 +3573,18 @@ class App(GestaoMixin, tk.Tk):
         ent_produto.pack(fill='x', padx=24, ipady=5)
         _uppercase_ao_digitar(ent_produto)
         lista_sug_produto = tk.Listbox(dlg, height=4, font=(FONTE, 9))
-        produto_escolhido = {'id': receita['produto_id'] if receita else None}
+        produto_escolhido = {'id': receita['produto_id'] if receita else None,
+                             'nome': receita['nome'] if receita else None}
         if receita:
             ent_produto.insert(0, receita['nome'])
             ent_produto.config(state='disabled')
 
         def buscar_produto(event=None):
+            # Se o texto deixou de ser exatamente o produto escolhido, a seleção
+            # é invalidada — evita salvar um ID que não corresponde ao nome.
+            if produto_escolhido.get('nome') and ent_produto.get().strip() != produto_escolhido['nome']:
+                produto_escolhido['id'] = None
+                produto_escolhido['nome'] = None
             termo = ent_produto.get().strip()
             lista_sug_produto.delete(0, 'end')
             if len(termo) < 2:
@@ -3569,7 +3595,7 @@ class App(GestaoMixin, tk.Tk):
                 lista_sug_produto.pack_forget()
                 return
             for p in achados:
-                lista_sug_produto.insert('end', p['nome'])
+                lista_sug_produto.insert('end', self._sugestao_produto(p))
             lista_sug_produto._achados = achados
             lista_sug_produto.pack(fill='x', padx=24, pady=(2, 0))
 
@@ -3580,10 +3606,13 @@ class App(GestaoMixin, tk.Tk):
                 ent_produto.delete(0, 'end')
                 ent_produto.insert(0, p['nome'])
                 produto_escolhido['id'] = p['id']
+                produto_escolhido['nome'] = p['nome']
                 lista_sug_produto.pack_forget()
 
         ent_produto.bind('<KeyRelease>', buscar_produto)
         lista_sug_produto.bind('<<ListboxSelect>>', escolher_produto)
+        lista_sug_produto.bind('<Return>', escolher_produto)
+        lista_sug_produto.bind('<Double-1>', escolher_produto)
 
         tk.Label(dlg, text='RENDIMENTO (quantas unidades essa receita rende)', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).pack(anchor='w', padx=24, pady=(12, 3))
         ent_rendimento = tk.Entry(dlg, font=('Consolas', 12), relief='solid', bd=1,
@@ -3597,37 +3626,66 @@ class App(GestaoMixin, tk.Tk):
         linhas_insumo = []
 
         def add_linha_insumo(insumo_inicial=None, quantidade_inicial=''):
-            linha = tk.Frame(frame_insumos, bg=COR['branco'])
-            linha.pack(fill='x', pady=2)
+            container = tk.Frame(frame_insumos, bg=COR['branco'])
+            container.pack(fill='x', pady=2)
+            linha = tk.Frame(container, bg=COR['branco'])
+            linha.pack(fill='x')
             ent_insumo = tk.Entry(linha, font=(FONTE, 9), relief='solid', bd=1)
             ent_insumo.pack(side='left', fill='x', expand=True, ipady=4)
             _uppercase_ao_digitar(ent_insumo)
             ent_qtd_insumo = tk.Entry(linha, font=('Consolas', 9), relief='solid', bd=1, width=10)
             ent_qtd_insumo.pack(side='left', padx=(6, 6), ipady=4)
-            estado = {'id': insumo_inicial['insumo_id'] if insumo_inicial else None}
+            estado = {'id': insumo_inicial['insumo_id'] if insumo_inicial else None,
+                      'nome': insumo_inicial['nome'] if insumo_inicial else None}
             if insumo_inicial:
                 ent_insumo.insert(0, insumo_inicial['nome'])
                 ent_qtd_insumo.insert(0, str(insumo_inicial['quantidade']))
             elif quantidade_inicial:
                 ent_qtd_insumo.insert(0, quantidade_inicial)
 
+            lista_sug = tk.Listbox(container, height=3, font=(FONTE, 8))
+
             def remover():
-                linha.destroy()
+                container.destroy()
                 linhas_insumo.remove(registro)
 
             ttk.Button(linha, text='✕', style='Secondary.TButton', width=3, command=remover).pack(side='left')
 
             def buscar_insumo(event=None):
+                # Alterar o texto invalida o insumo escolhido antes (não deixa
+                # um ID "grudado" quando a busca passa a não encontrar nada).
+                if estado.get('nome') and ent_insumo.get().strip() != estado['nome']:
+                    estado['id'] = None
+                    estado['nome'] = None
                 termo = ent_insumo.get().strip()
+                lista_sug.delete(0, 'end')
                 if len(termo) < 2:
+                    lista_sug.pack_forget()
                     return
-                achados = op.listar_produtos(termo)
-                if achados:
-                    estado['id'] = achados[0]['id']
-                    estado['candidatos'] = achados
+                achados = op.listar_produtos(termo)[:8]
+                if not achados:
+                    lista_sug.pack_forget()
+                    return
+                for p in achados:
+                    lista_sug.insert('end', self._sugestao_produto(p))
+                lista_sug._achados = achados
+                lista_sug.pack(fill='x', pady=(0, 2))
+
+            def escolher_insumo(event=None):
+                s = lista_sug.curselection()
+                if s:
+                    p = lista_sug._achados[s[0]]
+                    ent_insumo.delete(0, 'end')
+                    ent_insumo.insert(0, p['nome'])
+                    estado['id'] = p['id']
+                    estado['nome'] = p['nome']
+                    lista_sug.pack_forget()
 
             ent_insumo.bind('<KeyRelease>', buscar_insumo)
-            registro = {'estado': estado, 'ent_insumo': ent_insumo, 'ent_qtd': ent_qtd_insumo}
+            lista_sug.bind('<<ListboxSelect>>', escolher_insumo)
+            lista_sug.bind('<Return>', escolher_insumo)
+            lista_sug.bind('<Double-1>', escolher_insumo)
+            registro = {'estado': estado, 'ent_insumo': ent_insumo, 'ent_qtd': ent_qtd_insumo, 'lista_sug': lista_sug}
             linhas_insumo.append(registro)
 
         if receita:
@@ -5608,6 +5666,25 @@ class App(GestaoMixin, tk.Tk):
         self.status.config(text=self._texto_status())
         self.after(1000, self._relogio)
 
+    def _registrar_erro(self, contexto, exc):
+        """Registra um erro de atualização de tela num log e avisa o operador,
+        sem interromper o uso. Não expõe dados sensíveis (só contexto e tipo)."""
+        import traceback
+        import tempfile
+        try:
+            destino = os.path.join(tempfile.gettempdir(), 'mercadinho_erros.log')
+            with open(destino, 'a', encoding='utf-8') as f:
+                f.write(f'{datetime.now().isoformat(timespec="seconds")} [{contexto}] '
+                        f'{type(exc).__name__}: {exc}\n')
+                f.write(traceback.format_exc())
+                f.write('\n')
+        except Exception:
+            pass
+        try:
+            self._toast(f'Falha ao atualizar a tela ({contexto}). Veja o log do sistema.')
+        except Exception:
+            pass
+
     def _aba_atualizada(self):
         try:
             if hasattr(self,'painel_financeiro'): self._atualizar_financeiro()
@@ -5629,8 +5706,8 @@ class App(GestaoMixin, tk.Tk):
                 self.entrada_perda.focus_set()
             elif aba == str(self.tab_caixa):
                 self.entrada.focus_set()
-        except Exception:
-            pass
+        except Exception as exc:
+            self._registrar_erro('atualizar abas', exc)
 
     def _atualizar_aba_selecionada(self):
         """Atualiza somente os dados da aba que ficou visivel. Evita recarregar
@@ -5658,8 +5735,8 @@ class App(GestaoMixin, tk.Tk):
                 self.entrada_perda.focus_set()
             elif aba == str(getattr(self, 'tab_caixa', '')):
                 self.entrada.focus_set()
-        except Exception:
-            pass
+        except Exception as exc:
+            self._registrar_erro('atualizar aba selecionada', exc)
 
     def _tarefas_30min(self):
         try:

@@ -650,8 +650,11 @@ class GestaoMixin:
         if not receitas:
             messagebox.showinfo('Produção','Cadastre primeiro uma receita com insumos e rendimento.'); return
         opcoes=[f"{r['id']} — {r['nome']}" for r in receitas]
+        # Chave estável por abertura do formulário: duplo clique/reenvio não
+        # gera duas produções.
+        chave=uuid.uuid4().hex
         def salvar(v):
-            r=g.registrar_producao(int(v['receita'].split(' — ')[0]),v['multiplicador'],v['observacao'],v['validade'],v['rendimento'] or None,v['responsavel'])
+            r=g.registrar_producao(int(v['receita'].split(' — ')[0]),v['multiplicador'],v['observacao'],v['validade'],v['rendimento'] or None,v['responsavel'],chave=chave)
             self._toast(f"Produção #{r['id']}: {r['quantidade_produzida']:g} de {r['produto_nome']}; custo unitário {self._moeda(r['custo_unitario'])}.")
         self._formulario('Registrar produção de alimentos',[('receita','Receita',opcoes[0],opcoes),('multiplicador','Quantas vezes a receita foi utilizada','1',None),('rendimento','Quantidade final real (vazio = rendimento da receita)','',None),('validade','Validade do produto final','',None),('responsavel','Responsável',g.USUARIO,None),('observacao','Observações / qualidade','',None)],salvar,
                          'Insumos são baixados por lote válido. O rendimento real define o custo unitário e a entrada do lote produzido; a venda posterior baixa apenas o produto final.')

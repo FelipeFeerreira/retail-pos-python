@@ -4,11 +4,14 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 
 import database as db
 import gestao as g
 import operacoes as op
+import producao as prod
+import validade as val
 import backup as bk
 import importar_nfe as nfe
 from applock import TravaInstancia, InstanciaJaAberta
@@ -92,6 +95,173 @@ class AutenticacaoTest(BaseTemp):
         g.sair()
         self.assertFalse(g.autenticar('admin', 'senha1234'))
         self.assertTrue(g.autenticar('admin', 'novasenha1'))
+
+
+class CustoMedioNegativoTest(BaseTemp):
+    def _produto_saldo(self, saldo, custo=10.0):
+        pid = op.criar_produto('PROD NEG', preco_custo=custo, preco_venda=20,
+                               quantidade_estoque=0)
+        conn = db.get_conn()
+        try:
+            conn.execute('UPDATE produtos SET quantidade_estoque=? WHERE id=?', (saldo, pid))
+            conn.commit()
+        finally:
+            conn.close()
+        return pid
+
+    def test_helper_sem_divisao_por_zero(self):
+        self.assertEqual(g.custo_medio_entrada(-5, 10, 5, 3), 3.0)   # zera o saldo
+        self.assertEqual(g.custo_medio_entrada(0, 10, 5, 3), 3.0)
+        self.assertEqual(g.custo_medio_entrada(-5, 10, 10, 3), 3.0)  # fica positivo
+        self.assertEqual(g.custo_medio_entrada(5, 2, 5, 4), 3.0)     # média normal
+
+    def test_ajustar_estoque_negativo_zera(self):
+        pid = self._produto_saldo(-5)
+        novo = g.ajustar_estoque(pid, 5, 'entrada', 'Regularização doc 1', custo=3)
+        self.assertEqual(novo, 0)
+        p = op.obter_produto(pid)
+        self.assertEqual(p['quantidade_estoque'], 0)
+        self.assertEqual(p['preco_custo'], 3.0)  # custo documentado, não inventado
+
+    def test_ajustar_estoque_negativo_fica_positivo(self):
+        pid = self._produto_saldo(-5)
+        g.ajustar_estoque(pid, 10, 'entrada', 'Regularização doc 2', custo=4)
+        p = op.obter_produto(pid)
+        self.assertEqual(p['quantidade_estoque'], 5)
+        self.assertEqual(p['preco_custo'], 4.0)
+
+    def test_receber_compra_estoque_negativo(self):
+        pid = self._produto_saldo(-5, custo=8)
+        comp = g.receber_compra([{'produto_id': pid, 'quantidade': 5, 'custo': 3.0}],
+                                'FORNECEDOR', 'DOC1', (date.today() + timedelta(days=10)).isoformat())
+        p = op.obter_produto(pid)
+        self.assertEqual(p['quantidade_estoque'], 0)
+        self.assertEqual(p['preco_custo'], 3.0)
+        self.assertTrue(comp)
+
+    def test_producao_estoque_negativo_zera(self):
+        final = self._produto_saldo(-5, custo=8)
+        insumo = op.criar_produto('INSUMO', preco_custo=1, preco_venda=2, quantidade_estoque=100)
+        rid = prod.criar_receita(final, rendimento=5, itens=[{'insumo_id': insumo, 'quantidade': 5}])
+        validade = (date.today() + timedelta(days=30)).isoformat()
+        r = g.registrar_producao(rid, 1, validade=validade)
+        p = op.obter_produto(final)
+        self.assertEqual(p['quantidade_estoque'], 0)
+        self.assertGreater(r['custo_unitario'], 0)
+
+    def test_producao_estoque_negativo_fica_positivo(self):
+        final = self._produto_saldo(-5, custo=8)
+        insumo = op.criar_produto('INSUMO2', preco_custo=2, preco_venda=3, quantidade_estoque=100)
+        rid = prod.criar_receita(final, rendimento=5, itens=[{'insumo_id': insumo, 'quantidade': 5}])
+        validade = (date.today() + timedelta(days=30)).isoformat()
+        g.registrar_producao(rid, 3, validade=validade)  # produz 15
+        p = op.obter_produto(final)
+        self.assertEqual(p['quantidade_estoque'], 10)
+
+
+class LoteVencidoTest(BaseTemp):
+    def setUp(self):
+        super().setUp()
+        g.abrir_caixa(0)
+        self.pid = op.criar_produto('PERECIVEL', preco_custo=2, preco_venda=5, quantidade_estoque=10)
+        conn = db.get_conn()
+        try:
+            conn.execute('UPDATE produtos SET perecivel=1 WHERE id=?', (self.pid,))
+            conn.commit()
+        finally:
+            conn.close()
+        self.vencido = val.registrar_lote(self.pid, 2, (date.today() - timedelta(days=2)).isoformat())
+        self.valido = val.registrar_lote(self.pid, 8, (date.today() + timedelta(days=10)).isoformat())
+
+    def test_consumo_lote_vencido_bloqueado_sem_efeito(self):
+        with self.assertRaises(g.ErroGestao):
+            g.registrar_baixa([{'produto_id': self.pid, 'quantidade': 1, 'lote_id': self.vencido}],
+                              'Limpeza', perda=False)
+        self.assertEqual(op.obter_produto(self.pid)['quantidade_estoque'], 10)
+        self.assertEqual(g.consultar('SELECT COUNT(*) n FROM consumo_interno')[0]['n'], 0)
+
+    def test_perda_lote_vencido_permitida(self):
+        r = g.registrar_baixa([{'produto_id': self.pid, 'quantidade': 1, 'lote_id': self.vencido}],
+                              'Validade vencida', perda=True)
+        self.assertTrue(r['id'])
+        self.assertEqual(op.obter_produto(self.pid)['quantidade_estoque'], 9)
+        lote = g.consultar('SELECT quantidade FROM lotes_validade WHERE id=?', (self.vencido,))[0]
+        self.assertEqual(lote['quantidade'], 1)
+
+    def test_lote_de_outro_produto_rejeitado(self):
+        outro = op.criar_produto('OUTRO', preco_custo=1, preco_venda=2, quantidade_estoque=5)
+        outro_lote = val.registrar_lote(outro, 1, (date.today() + timedelta(days=5)).isoformat())
+        with self.assertRaises(g.ErroGestao):
+            g.registrar_baixa([{'produto_id': self.pid, 'quantidade': 1, 'lote_id': outro_lote}],
+                              'Limpeza', perda=False)
+
+    def test_quantidade_maior_que_lote_rejeitada(self):
+        with self.assertRaises(g.ErroGestao):
+            g.registrar_baixa([{'produto_id': self.pid, 'quantidade': 9, 'lote_id': self.valido}],
+                              'Limpeza', perda=False)
+        self.assertEqual(op.obter_produto(self.pid)['quantidade_estoque'], 10)
+        self.assertEqual(g.consultar('SELECT COUNT(*) n FROM consumo_interno')[0]['n'], 0)
+
+
+class RelatorioProducaoCanceladaTest(BaseTemp):
+    def test_venda_cancelada_nao_conta_como_vendido(self):
+        g.abrir_caixa(0)
+        pao = op.criar_produto('PAO', preco_custo=2, preco_venda=10, quantidade_estoque=0)
+        farinha = op.criar_produto('FARINHA', preco_custo=1, preco_venda=2, quantidade_estoque=100)
+        rid = prod.criar_receita(pao, rendimento=10, itens=[{'insumo_id': farinha, 'quantidade': 10}])
+        g.registrar_producao(rid, 1, validade=(date.today() + timedelta(days=30)).isoformat())
+        venda = op.registrar_venda([{'produto_id': pao, 'quantidade': 1}], 'dinheiro')
+        hoje = date.today()
+        rel = prod.relatorio_diario_produto(pao, hoje.year, hoje.month)
+        self.assertEqual(rel['totais']['vendido'], 1)
+        g.cancelar_venda(venda['id'], 'Cliente desistiu')
+        rel2 = prod.relatorio_diario_produto(pao, hoje.year, hoje.month)
+        self.assertEqual(rel2['totais']['vendido'], 0)
+
+    def test_consumo_cliente_ignora_cancelada(self):
+        cli = op.criar_cliente('Cliente Cancelado')
+        p = op.criar_produto('ITEM', preco_custo=1, preco_venda=5, quantidade_estoque=50)
+        g.abrir_caixa(0)
+        v = op.registrar_venda([{'produto_id': p, 'quantidade': 3}], 'dinheiro', cliente_id=cli)
+        self.assertEqual(op.consumo_cliente(cli)['produtos'][0]['qtd'], 3)
+        g.cancelar_venda(v['id'], 'Engano')
+        self.assertEqual(op.consumo_cliente(cli)['produtos'], [])
+
+
+class IdempotenciaTest(BaseTemp):
+    def test_consumo_mesma_chave_nao_duplica(self):
+        g.abrir_caixa(0)
+        p = op.criar_produto('ITEM IDEM', preco_custo=1, preco_venda=2, quantidade_estoque=50)
+        r1 = op.registrar_consumo_interno([{'produto_id': p, 'quantidade': 2}], 'Limpeza', chave='k1')
+        r2 = op.registrar_consumo_interno([{'produto_id': p, 'quantidade': 2}], 'Limpeza', chave='k1')
+        self.assertEqual(r1['id'], r2['id'])
+        self.assertEqual(g.consultar('SELECT COUNT(*) n FROM consumo_interno')[0]['n'], 1)
+        self.assertEqual(op.obter_produto(p)['quantidade_estoque'], 48)
+        # Chave distinta = operação legítima nova.
+        op.registrar_consumo_interno([{'produto_id': p, 'quantidade': 2}], 'Limpeza', chave='k2')
+        self.assertEqual(g.consultar('SELECT COUNT(*) n FROM consumo_interno')[0]['n'], 2)
+        self.assertEqual(op.obter_produto(p)['quantidade_estoque'], 46)
+
+    def test_perda_mesma_chave_nao_duplica(self):
+        g.abrir_caixa(0)
+        p = op.criar_produto('ITEM PERDA', preco_custo=1, preco_venda=2, quantidade_estoque=10)
+        r1 = op.registrar_perda([{'produto_id': p, 'quantidade': 1}], 'Quebra', chave='p1')
+        r2 = op.registrar_perda([{'produto_id': p, 'quantidade': 1}], 'Quebra', chave='p1')
+        self.assertEqual(r1['id'], r2['id'])
+        self.assertEqual(g.consultar('SELECT COUNT(*) n FROM perdas')[0]['n'], 1)
+        self.assertEqual(op.obter_produto(p)['quantidade_estoque'], 9)
+
+    def test_producao_mesma_chave_nao_duplica(self):
+        final = op.criar_produto('FINAL', preco_custo=1, preco_venda=2, quantidade_estoque=0)
+        insumo = op.criar_produto('INSUMO', preco_custo=1, preco_venda=2, quantidade_estoque=100)
+        rid = prod.criar_receita(final, rendimento=5, itens=[{'insumo_id': insumo, 'quantidade': 5}])
+        validade = (date.today() + timedelta(days=30)).isoformat()
+        r1 = g.registrar_producao(rid, 1, validade=validade, chave='prod1')
+        r2 = g.registrar_producao(rid, 1, validade=validade, chave='prod1')
+        self.assertEqual(r1['id'], r2['id'])
+        self.assertEqual(g.consultar('SELECT COUNT(*) n FROM producoes')[0]['n'], 1)
+        self.assertEqual(op.obter_produto(final)['quantidade_estoque'], 5)
+        self.assertEqual(op.obter_produto(insumo)['quantidade_estoque'], 95)
 
 
 class BalancaTest(unittest.TestCase):

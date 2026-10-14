@@ -275,7 +275,7 @@ def extrato_cliente(cliente_id):
     conn=db.get_conn()
     try:
         vendas=conn.execute(
-            '''SELECT id,data_hora,valor_total,desconto,forma_pagamento
+            '''SELECT id,data_hora,valor_total,desconto,forma_pagamento,COALESCE(cancelada,0) cancelada
                FROM vendas WHERE cliente_id=? ORDER BY data_hora DESC''',(cliente_id,)).fetchall()
         eventos=[]
         for v in vendas:
@@ -286,7 +286,8 @@ def extrato_cliente(cliente_id):
             eventos.append({
                 'tipo':'compra','data_hora':v['data_hora'],'venda_id':v['id'],
                 'valor':round(v['valor_total'],2),'desconto':round(v['desconto'] or 0,2),
-                'forma_pagamento':v['forma_pagamento'],'itens':[dict(i) for i in itens],
+                'forma_pagamento':v['forma_pagamento'],'cancelada':bool(v['cancelada']),
+                'itens':[dict(i) for i in itens],
             })
         pagamentos=conn.execute(
             '''SELECT id,data_hora,valor,forma_pagamento,observacao FROM pagamentos_fiado
@@ -379,7 +380,7 @@ def obter_dashboard():
         dia=_resumo_periodo(conn,hoje_iso,hoje_iso)
         semana=_resumo_periodo(conn,inicio_semana.isoformat(),hoje_iso)
         mes=_resumo_periodo(conn,inicio_mes.isoformat(),hoje_iso)
-        mv=conn.execute('SELECT p.nome,p.unidade,SUM(iv.quantidade) qtd FROM itens_venda iv JOIN vendas v ON v.id=iv.venda_id JOIN produtos p ON p.id=iv.produto_id WHERE date(v.data_hora)=? GROUP BY p.id ORDER BY qtd DESC',(hoje_iso,)).fetchall()
+        mv=conn.execute('SELECT p.nome,p.unidade,SUM(iv.quantidade) qtd FROM itens_venda iv JOIN vendas v ON v.id=iv.venda_id JOIN produtos p ON p.id=iv.produto_id WHERE v.cancelada=0 AND date(v.data_hora)=? GROUP BY p.id ORDER BY qtd DESC',(hoje_iso,)).fetchall()
         eb=conn.execute('SELECT nome,unidade,quantidade_estoque,estoque_minimo FROM produtos WHERE ativo=1 AND quantidade_estoque>0 AND quantidade_estoque<estoque_minimo ORDER BY quantidade_estoque').fetchall()
         ez=conn.execute('SELECT nome,unidade,quantidade_estoque FROM produtos WHERE ativo=1 AND quantidade_estoque<=0 ORDER BY nome').fetchall()
         return {'dia':dia,'semana':semana,'mes':mes,'mais_vendidos':[dict(x) for x in mv],'estoque_acabando':[dict(x) for x in eb],'estoque_zerado':[dict(x) for x in ez]}
@@ -392,7 +393,7 @@ def consumo_cliente(cliente_id, ano_mes=None):
     try:
         base='''SELECT p.nome,p.unidade,SUM(iv.quantidade) qtd,SUM(iv.quantidade*iv.preco_unitario) total
                 FROM itens_venda iv JOIN vendas v ON v.id=iv.venda_id JOIN produtos p ON p.id=iv.produto_id
-                WHERE v.cliente_id=?'''
+                WHERE v.cliente_id=? AND v.cancelada=0'''
         params=[cliente_id]
         if ano_mes:
             base+=" AND strftime('%Y-%m',v.data_hora)=?"; params.append(ano_mes)
@@ -400,7 +401,7 @@ def consumo_cliente(cliente_id, ano_mes=None):
         produtos=conn.execute(base,params).fetchall()
 
         meses=conn.execute('''SELECT strftime('%Y-%m',data_hora) mes,COUNT(*) n,SUM(valor_total) total
-                               FROM vendas WHERE cliente_id=? GROUP BY mes ORDER BY mes DESC''',(cliente_id,)).fetchall()
+                               FROM vendas WHERE cliente_id=? AND cancelada=0 GROUP BY mes ORDER BY mes DESC''',(cliente_id,)).fetchall()
         return {'produtos':[dict(x) for x in produtos],'meses':[dict(x) for x in meses]}
     finally: conn.close()
 
@@ -411,9 +412,9 @@ def consumo_cliente(cliente_id, ano_mes=None):
 
 MOTIVOS_CONSUMO = ['Limpeza', 'Lanches da equipe', 'Embalagens e insumos operacionais (sacola, saco, filme)', 'Consumo pessoal/família', 'Outro']
 
-def registrar_consumo_interno(itens,motivo='',observacao='',responsavel=None,centro_custo=''):
+def registrar_consumo_interno(itens,motivo='',observacao='',responsavel=None,centro_custo='',chave=None):
     try:
-        return g.registrar_baixa(itens,motivo,observacao,False,responsavel,centro_custo)
+        return g.registrar_baixa(itens,motivo,observacao,False,responsavel,centro_custo,chave)
     except g.ErroGestao as exc:
         raise ErroOperacao(str(exc)) from exc
 
@@ -469,9 +470,9 @@ def resumo_consumo_por_motivo(inicio=None, fim=None):
 # ----------------------------------------------------------------------
 MOTIVOS_PERDA = ['Validade vencida', 'Estragado/danificado', 'Quebra/avaria', 'Furto', 'Outro']
 
-def registrar_perda(itens,motivo='',observacao='',responsavel=None):
+def registrar_perda(itens,motivo='',observacao='',responsavel=None,chave=None):
     try:
-        return g.registrar_baixa(itens,motivo,observacao,True,responsavel)
+        return g.registrar_baixa(itens,motivo,observacao,True,responsavel,chave=chave)
     except g.ErroGestao as exc:
         raise ErroOperacao(str(exc)) from exc
 

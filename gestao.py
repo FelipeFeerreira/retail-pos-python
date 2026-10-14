@@ -63,6 +63,21 @@ def centavos_itens(itens):
     return total
 
 
+def custo_medio_entrada(quantidade_antiga, custo_antigo, quantidade_entrada, custo_entrada):
+    """Custo médio após uma entrada de mercadoria/produção, sem dividir por zero.
+
+    Política para estoque negativo: se o estoque anterior NÃO é positivo, não
+    existe base confiável para ponderar custo (estoque negativo é erro de
+    registro, não inventário real) — então assume o custo da própria entrada,
+    que é um valor documentado. Não usa divisor fictício nem custo inventado.
+    Com estoque anterior positivo, faz a média ponderada normal."""
+    q_ant = float(quantidade_antiga or 0)
+    q_ent = float(quantidade_entrada or 0)
+    if q_ant <= 0:
+        return float(custo_entrada or 0)
+    return (q_ant * float(custo_antigo or 0) + q_ent * float(custo_entrada or 0)) / (q_ant + q_ent)
+
+
 def quantidade(valor):
     try:
         n = float(str(valor).replace(',', '.'))
@@ -125,9 +140,9 @@ def migrar(conn):
                              'chave_operacao': 'TEXT', 'estornado': 'INTEGER NOT NULL DEFAULT 0', 'movimento_id': 'INTEGER',
                              'taxa_centavos': 'INTEGER NOT NULL DEFAULT 0',
                              'usuario': "TEXT NOT NULL DEFAULT 'Legado'"},
-        'consumo_interno': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'centro_custo': "TEXT NOT NULL DEFAULT ''"},
-        'perdas': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'"},
-        'producoes': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'validade': 'TEXT', 'rendimento_real': 'REAL'},
+        'consumo_interno': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'centro_custo': "TEXT NOT NULL DEFAULT ''", 'chave': 'TEXT'},
+        'perdas': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'chave': 'TEXT'},
+        'producoes': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'validade': 'TEXT', 'rendimento_real': 'REAL', 'chave': 'TEXT'},
     }
     for tabela, colunas in campos.items():
         existentes = {r['name'] for r in conn.execute(f'PRAGMA table_info({tabela})')}
@@ -138,6 +153,9 @@ def migrar(conn):
     conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_prod_sku ON produtos(sku)')
     conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_venda_chave ON vendas(chave_operacao)')
     conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_receb_chave ON pagamentos_fiado(chave_operacao)')
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_consumo_chave ON consumo_interno(chave)')
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_perda_chave ON perdas(chave)')
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_producao_chave ON producoes(chave)')
     conn.executescript('''
       CREATE TRIGGER IF NOT EXISTS produto_sku_interno AFTER INSERT ON produtos
       WHEN NEW.sku IS NULL OR trim(NEW.sku)=''
@@ -282,9 +300,18 @@ def baixar_estoque(c, produto_id, qtd, origem, referencia, permitir_vencido=Fals
     if not permitir_negativo and not permitir_vencido and qtd > p['quantidade_estoque']-vencidos+.00001:
         raise ErroGestao(f'{p["nome"]}: saldo disponível contém produtos vencidos. Registre a perda do lote.')
     if lote_id:
-        lotes = [l for l in lotes if l['id'] == lote_id]
-        if not lotes or qtd > lotes[0]['quantidade'] + .00001:
+        selecionados = [l for l in lotes if l['id'] == lote_id]
+        if not selecionados:
+            raise ErroGestao('O lote selecionado não pertence a este produto ou não tem saldo.')
+        lote_sel = selecionados[0]
+        # Consumo/produção/venda não podem usar lote vencido — mesmo que haja
+        # outro lote válido. Perda (permitir_vencido) pode, para dar baixa.
+        if not permitir_vencido and lote_sel['data_validade'] and lote_sel['data_validade'] < hoje:
+            raise ErroGestao(f'{p["nome"]}: o lote escolhido venceu em {lote_sel["data_validade"]}. '
+                             'Registre a perda desse lote ou escolha um lote válido.')
+        if qtd > lote_sel['quantidade'] + .00001:
             raise ErroGestao('Quantidade indisponível no lote selecionado.')
+        lotes = [lote_sel]
     elif not permitir_vencido:
         lotes = [l for l in lotes if not l['data_validade'] or l['data_validade'] >= hoje]
     if p['perecivel'] and not permitir_negativo and not permitir_vencido and sum(l['quantidade'] for l in lotes if l['data_validade'])+.00001 < qtd:
@@ -425,13 +452,19 @@ def recibo_fiado(pid):
     return '\n'.join(linhas)
 
 
-def registrar_baixa(itens,motivo,observacao='',perda=False,responsavel=None,centro_custo=''):
+def registrar_baixa(itens,motivo,observacao='',perda=False,responsavel=None,centro_custo='',chave=None):
     permitir('estoque')
     if not itens: raise ErroGestao('Adicione pelo menos um produto.')
     tabela='perdas' if perda else 'consumo_interno'
+    chave=chave or uuid.uuid4().hex
     with transacao() as c:
+        # Idempotência: mesma chave não gera duas baixas (protege de duplo clique
+        # e reenvio). Devolve o lançamento já existente, sem efeito novo.
+        existente=c.execute(f'SELECT id,valor_total FROM {tabela} WHERE chave=?',(chave,)).fetchone()
+        if existente:
+            return {'id':existente['id'],'valor_total':existente['valor_total'],'duplicado':True}
         total=0
-        rid=c.execute(f'INSERT INTO {tabela}(motivo,observacao,responsavel) VALUES(?,?,?)',(motivo,observacao,responsavel or USUARIO)).lastrowid
+        rid=c.execute(f'INSERT INTO {tabela}(motivo,observacao,responsavel,chave) VALUES(?,?,?,?)',(motivo,observacao,responsavel or USUARIO,chave)).lastrowid
         if not perda: c.execute('UPDATE consumo_interno SET centro_custo=? WHERE id=?',(centro_custo,rid))
         for it in itens:
             qtd=quantidade(it['quantidade'])
@@ -687,7 +720,7 @@ def ajustar_estoque(produto_id,qtd,tipo='entrada',observacao='',validade=None,cu
             novo_custo=p['preco_custo']
             if custo is not None:
                 if centavos(custo)<0: raise ErroGestao('Custo inválido.')
-                novo_custo=(p['quantidade_estoque']*p['preco_custo']+delta*float(custo))/(p['quantidade_estoque']+delta)
+                novo_custo=custo_medio_entrada(p['quantidade_estoque'],p['preco_custo'],delta,float(custo))
             c.execute('UPDATE produtos SET quantidade_estoque=round(quantidade_estoque+?,3),preco_custo=? WHERE id=?',(delta,novo_custo,produto_id))
             c.execute("INSERT INTO movimentacoes_estoque(produto_id,tipo,quantidade,observacao) VALUES(?,'entrada',?,?)",(produto_id,delta,observacao))
             if validade:
@@ -696,13 +729,19 @@ def ajustar_estoque(produto_id,qtd,tipo='entrada',observacao='',validade=None,cu
         return round(p['quantidade_estoque']+delta,3)
 
 
-def registrar_producao(receita_id,multiplicador,observacao='',validade=None,rendimento_real=None,responsavel=None):
+def registrar_producao(receita_id,multiplicador,observacao='',validade=None,rendimento_real=None,responsavel=None,chave=None):
     permitir('estoque')
     mult=quantidade(multiplicador)
     if not validade: raise ErroGestao('Informe a validade do lote produzido.')
     validade=data_iso(validade)
     if validade<date.today().isoformat(): raise ErroGestao('Produção não pode entrar com validade vencida.')
+    chave=chave or uuid.uuid4().hex
     with transacao() as c:
+        existente=c.execute('SELECT id,quantidade_produzida,custo_total,custo_unitario FROM producoes WHERE chave=?',(chave,)).fetchone()
+        if existente:
+            return {'id':existente['id'],'quantidade_produzida':existente['quantidade_produzida'],
+                    'custo_total':existente['custo_total'],'custo_unitario':existente['custo_unitario'],
+                    'insumos_usados':[],'duplicado':True}
         r=c.execute('SELECT * FROM receitas WHERE id=? AND ativo=1',(receita_id,)).fetchone()
         if not r: raise ErroGestao('Receita não encontrada.')
         p=c.execute('SELECT * FROM produtos WHERE id=? AND ativo=1',(r['produto_id'],)).fetchone()
@@ -710,8 +749,8 @@ def registrar_producao(receita_id,multiplicador,observacao='',validade=None,rend
         itens=c.execute('SELECT insumo_id,SUM(quantidade) quantidade FROM receita_itens WHERE receita_id=? GROUP BY insumo_id',(receita_id,)).fetchall()
         if not itens: raise ErroGestao('Cadastre os insumos da receita.')
         produzido=quantidade(rendimento_real if rendimento_real is not None else mult*r['rendimento'])
-        pid=c.execute('INSERT INTO producoes(receita_id,multiplicador,quantidade_produzida,observacao,responsavel,validade,rendimento_real) VALUES(?,?,?,?,?,?,?)',
-                      (receita_id,mult,produzido,observacao,responsavel or USUARIO,validade,produzido)).lastrowid
+        pid=c.execute('INSERT INTO producoes(receita_id,multiplicador,quantidade_produzida,observacao,responsavel,validade,rendimento_real,chave) VALUES(?,?,?,?,?,?,?,?)',
+                      (receita_id,mult,produzido,observacao,responsavel or USUARIO,validade,produzido,chave)).lastrowid
         custo,usados=Decimal(0),[]
         for it in itens:
             if it['insumo_id']==p['id']: raise ErroGestao('Produto final não pode consumir a si mesmo.')
@@ -722,7 +761,7 @@ def registrar_producao(receita_id,multiplicador,observacao='',validade=None,rend
             c.execute('INSERT INTO insumos_producao(producao_id,produto_id,nome,unidade,quantidade,custo_unitario) VALUES(?,?,?,?,?,?)',
                       (pid,insumo['id'],insumo['nome'],insumo['unidade'],qtd,insumo['preco_custo']))
         custo=centavos(custo)/100; unitario=custo/produzido
-        medio=(p['quantidade_estoque']*p['preco_custo']+custo)/(p['quantidade_estoque']+produzido)
+        medio=custo_medio_entrada(p['quantidade_estoque'],p['preco_custo'],produzido,unitario)
         c.execute('UPDATE produtos SET quantidade_estoque=round(quantidade_estoque+?,3),preco_custo=?,perecivel=1 WHERE id=?',(produzido,medio,p['id']))
         c.execute('INSERT INTO lotes_validade(produto_id,quantidade,data_validade,observacao) VALUES(?,?,?,?)',(p['id'],produzido,validade,f'Produção #{pid}'))
         c.execute("INSERT INTO movimentacoes_estoque(produto_id,tipo,quantidade,observacao) VALUES(?,'entrada',?,?)",(p['id'],produzido,f'Produção #{pid}'))
@@ -821,7 +860,16 @@ def consolidar_produtos(principal,duplicado,somar_estoque=False):
         if c.execute('SELECT 1 FROM receita_itens ri JOIN receitas r ON r.id=ri.receita_id WHERE ri.insumo_id=? AND r.produto_id=?',(duplicado,principal)).fetchone():
             raise ErroGestao('A consolidação faria o produto consumir a si mesmo.')
         total=a['quantidade_estoque']+b['quantidade_estoque']
-        custo=(a['quantidade_estoque']*a['preco_custo']+b['quantidade_estoque']*b['preco_custo'])/total if total else a['preco_custo']
+        # Sem ponderar quando um dos saldos não é positivo (estoque negativo é
+        # erro de registro): usa o custo do produto que tem saldo real.
+        if a['quantidade_estoque']>0 and b['quantidade_estoque']>0:
+            custo=(a['quantidade_estoque']*a['preco_custo']+b['quantidade_estoque']*b['preco_custo'])/total
+        elif a['quantidade_estoque']>0:
+            custo=a['preco_custo']
+        elif b['quantidade_estoque']>0:
+            custo=b['preco_custo']
+        else:
+            custo=a['preco_custo']
         c.execute('UPDATE produtos SET quantidade_estoque=?,preco_custo=? WHERE id=?',(total,custo,principal))
         # Histórico de vendas permanece no ID original. Somente estoque futuro é consolidado.
         c.execute('UPDATE lotes_validade SET produto_id=? WHERE produto_id=?',(principal,duplicado))
@@ -909,7 +957,7 @@ def receber_compra(itens,fornecedor,documento,vencimento,forma='A prazo',conta_i
         for p,qtd,custo,validade in processados:
             # Read again to support repeated product lines in the same document.
             atual=c.execute('SELECT quantidade_estoque,preco_custo FROM produtos WHERE id=?',(p['id'],)).fetchone()
-            media=(atual['quantidade_estoque']*atual['preco_custo']+qtd*custo)/(atual['quantidade_estoque']+qtd)
+            media=custo_medio_entrada(atual['quantidade_estoque'],atual['preco_custo'],qtd,custo)
             c.execute('UPDATE produtos SET quantidade_estoque=round(quantidade_estoque+?,3),preco_custo=?,fornecedor=? WHERE id=?',(qtd,media,fornecedor,p['id']))
             c.execute('INSERT INTO itens_compra(compra_id,produto_id,quantidade,custo_unitario,validade) VALUES(?,?,?,?,?)',(comp,p['id'],qtd,custo,validade))
             c.execute("INSERT INTO movimentacoes_estoque(produto_id,tipo,quantidade,observacao) VALUES(?,'entrada',?,?)",(p['id'],qtd,f'Compra #{comp} / {documento}'))

@@ -44,6 +44,26 @@ The application initializes its SQLite database on first run. On the first launc
 - **NF-e import:** the app never fabricates expiration dates or payment terms. When the invoice does not carry the due date, payment condition or the expiration of perishables, the preview asks for them explicitly and blocks the import until they are provided. Duplicate invoices are detected and ignored, and a failed import does not leave orphan product registrations.
 - **Single instance:** a cross-platform lock (Windows `msvcrt` / Unix `flock`) prevents two copies from opening the same SQLite file.
 
+## Roteiro do operador — consumo, perdas e produção
+
+**Consumo interno** (o que a própria casa/equipe usa, sai pelo preço de custo, não é venda):
+1. Aba **Consumo interno** → busque o produto por nome/código e informe a quantidade.
+2. Confira a lista e escolha o **motivo** (limpeza, equipe, pessoal/família, operacional).
+3. **Registrar consumo**. Se o estoque for insuficiente, o sistema avisa a causa — registre a **entrada/inventário** primeiro (não force saldo negativo).
+
+**Perdas** (venceu, estragou, quebrou — prejuízo puro):
+1. Aba **Perdas** → adicione o produto e a quantidade. Se o item tiver lotes, **escolha o lote perdido** (na tela de lotes há o atalho "Registrar perda deste lote").
+2. Informe o **motivo** e confirme. Lote vencido pode ser baixado como perda (com motivo); para consumo/produção/venda, lote vencido é **bloqueado** mesmo havendo outro lote válido.
+
+**Produção** (transforma insumos em um produto que entra no estoque):
+1. Cadastre a **receita** (produto final, rendimento e insumos) — selecione cada insumo e produto final na lista de sugestões (nome + unidade + código).
+2. **Registrar produção** → informe quantas vezes fez a receita, o rendimento real (se diferente) e a validade do produto final.
+3. Tudo é gravado numa **única transação**: se faltar um insumo, nada é alterado. Duplo clique não gera duas produções (idempotência por chave).
+
+**Saneamento de estoque negativo** (conferência, sem inventar custo):
+- Estoque negativo é erro de registro. Ao repor (compra, produção ou ajuste), o **custo médio** só é ponderado quando o saldo anterior é positivo; com saldo negativo/zero, assume o **custo da própria entrada** — nunca divide por zero nem inventa custo.
+- Faça **inventário** (Produtos → Inventário) para acertar o saldo físico antes de operar. O banco **não é saneado automaticamente**.
+
 ## Balança Toledo 8217 (Prix)
 
 Configuração em **Arquivo → Configurar balança**. O app já fala os protocolos da 8217 (P05A, P05B, P05, P06).

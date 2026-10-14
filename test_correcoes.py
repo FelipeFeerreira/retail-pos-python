@@ -130,6 +130,13 @@ class CustoMedioNegativoTest(BaseTemp):
         self.assertEqual(p['quantidade_estoque'], 5)
         self.assertEqual(p['preco_custo'], 4.0)
 
+    def test_ajustar_estoque_negativo_continua_negativo(self):
+        pid = self._produto_saldo(-5)
+        g.ajustar_estoque(pid, 2, 'entrada', 'Regularização doc 3', custo=4)
+        p = op.obter_produto(pid)
+        self.assertEqual(p['quantidade_estoque'], -3)
+        self.assertEqual(p['preco_custo'], 4.0)
+
     def test_receber_compra_estoque_negativo(self):
         pid = self._produto_saldo(-5, custo=8)
         comp = g.receber_compra([{'produto_id': pid, 'quantidade': 5, 'custo': 3.0}],
@@ -262,6 +269,50 @@ class IdempotenciaTest(BaseTemp):
         self.assertEqual(g.consultar('SELECT COUNT(*) n FROM producoes')[0]['n'], 1)
         self.assertEqual(op.obter_produto(final)['quantidade_estoque'], 5)
         self.assertEqual(op.obter_produto(insumo)['quantidade_estoque'], 95)
+
+
+class MigracaoVersaoTest(BaseTemp):
+    def test_backup_pre_migracao_ao_mudar_versao(self):
+        pasta_backups = Path(self.temp.name) / 'backups'
+        # Simula um banco na versão anterior (2), sem as colunas de idempotência.
+        conn = db.get_conn()
+        try:
+            for idx in ('idx_consumo_chave', 'idx_perda_chave', 'idx_producao_chave'):
+                conn.execute(f'DROP INDEX IF EXISTS {idx}')
+            for t in ('consumo_interno', 'perdas', 'producoes'):
+                if 'chave' in [r['name'] for r in conn.execute(f'PRAGMA table_info({t})')]:
+                    conn.execute(f'ALTER TABLE {t} DROP COLUMN chave')
+            conn.execute("UPDATE schema_meta SET valor='2' WHERE chave='versao'")
+            conn.commit()
+        finally:
+            conn.close()
+        # Aumentar a versão do esquema deve disparar backup pré-migração.
+        db.init_db()
+        backups = list(pasta_backups.glob('antes_migracao_v*_*.db')) if pasta_backups.exists() else []
+        self.assertTrue(backups, 'backup pré-migração não foi criado ao mudar a versão')
+        conn = db.get_conn()
+        try:
+            self.assertEqual(conn.execute("SELECT valor FROM schema_meta WHERE chave='versao'").fetchone()['valor'],
+                             str(db.SCHEMA_VERSAO))
+            for t in ('consumo_interno', 'perdas', 'producoes'):
+                self.assertIn('chave', [r['name'] for r in conn.execute(f'PRAGMA table_info({t})')])
+        finally:
+            conn.close()
+
+    def test_migracao_repetida_nao_recria_backup(self):
+        pasta_backups = Path(self.temp.name) / 'backups'
+        conn = db.get_conn()
+        try:
+            conn.execute("UPDATE schema_meta SET valor='2' WHERE chave='versao'")
+            conn.commit()
+        finally:
+            conn.close()
+        db.init_db()  # migra 2 -> atual e cria backup
+        antes = set(os.listdir(pasta_backups)) if pasta_backups.exists() else set()
+        self.assertTrue(antes, 'esperava um backup na primeira migração')
+        db.init_db()  # repetida: já na versão corrente, não cria backup novo
+        depois = set(os.listdir(pasta_backups)) if pasta_backups.exists() else set()
+        self.assertEqual(depois - antes, set(), 'migração repetida não deve criar backup novo')
 
 
 class BalancaTest(unittest.TestCase):

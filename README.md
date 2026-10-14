@@ -52,7 +52,7 @@ The application initializes its SQLite database on first run. On the first launc
 3. **Registrar consumo**. Se o estoque for insuficiente, o sistema avisa a causa — registre a **entrada/inventário** primeiro (não force saldo negativo).
 
 **Perdas** (venceu, estragou, quebrou — prejuízo puro):
-1. Aba **Perdas** → adicione o produto e a quantidade. Se o item tiver lotes, **escolha o lote perdido** (na tela de lotes há o atalho "Registrar perda deste lote").
+1. Aba **Perdas** → adicione o produto e a quantidade. Se o item tiver lotes, **escolha o lote perdido** (há também o atalho **"Registrar perda"** na aba Lotes e validade, que baixa o lote selecionado).
 2. Informe o **motivo** e confirme. Lote vencido pode ser baixado como perda (com motivo); para consumo/produção/venda, lote vencido é **bloqueado** mesmo havendo outro lote válido.
 
 **Produção** (transforma insumos em um produto que entra no estoque):
@@ -63,6 +63,14 @@ The application initializes its SQLite database on first run. On the first launc
 **Saneamento de estoque negativo** (conferência, sem inventar custo):
 - Estoque negativo é erro de registro. Ao repor (compra, produção ou ajuste), o **custo médio** só é ponderado quando o saldo anterior é positivo; com saldo negativo/zero, assume o **custo da própria entrada** — nunca divide por zero nem inventa custo.
 - Faça **inventário** (Produtos → Inventário) para acertar o saldo físico antes de operar. O banco **não é saneado automaticamente**.
+
+**Custo desconhecido:** quando o produto está sem preço de custo (≤ 0), as telas de consumo, perdas e produção mostram "custo desconhecido" em vez de R$ 0,00, e o total fica marcado como parcial — para não confundir desconhecido com custo zero.
+
+**Idempotência:** consumo, perdas e produção gravam uma chave única. Duplo clique ou reenvio da mesma tentativa não gera dois lançamentos (inclui o consumo por Ferramentas e a perda pela aba Lotes).
+
+## Migrações
+
+O esquema é versionado (`schema_meta.versao` em `database.py`, constante `SCHEMA_VERSAO`). Ao abrir o app, se o banco estiver numa versão anterior, é criado um **backup pré-migração** consistente (`backups/antes_migracao_v<versão>_<data>.db`) antes de aplicar colunas/tabelas/índices — a migração é aditiva e repetível. **Ao alterar o esquema, aumente `SCHEMA_VERSAO`**, senão bancos já na versão atual migram sem backup.
 
 ## Balança Toledo 8217 (Prix)
 
@@ -85,10 +93,14 @@ O protocolo P05A manda o peso como 5 dígitos sem ponto (`15000` = 15,000 kg); P
 ```bash
 # Windows
 .venv\Scripts\python.exe -m unittest test_gestao test_correcoes -v
+.venv\Scripts\python.exe test_producao_ui.py
+.venv\Scripts\python.exe test_operacional_ui.py
 .venv\Scripts\python.exe test_interface.py
 
 # Linux / macOS
 .venv/bin/python -m unittest test_gestao test_correcoes -v
+.venv/bin/python test_producao_ui.py
+.venv/bin/python test_operacional_ui.py
 .venv/bin/python test_interface.py
 ```
 
@@ -105,8 +117,9 @@ The regression suite redirects database operations to temporary files. The inter
 | `balanca.py`, `impressora.py` | Hardware integration |
 | `applock.py` | Cross-platform single-instance lock |
 | `backup.py` | Consistent SQLite backups, retention and restore |
-| `importar_nfe.py` | Supplier invoice (NF-e) import with safe preview |
-| `test_gestao.py`, `test_correcoes.py`, `test_interface.py` | Regression, security/import/backup and UI smoke tests |
+| `importar_nfe.py`, `importar_entrada.py`, `importar_planilha.py` | Supplier invoice and spreadsheet imports with safe preview |
+| `test_gestao.py`, `test_correcoes.py` | Regression, security, import, backup and migration tests |
+| `test_producao_ui.py`, `test_operacional_ui.py`, `test_interface.py` | GUI tests (recipe selection, loss flow) and interface smoke test |
 
 ## Limitations
 

@@ -412,6 +412,22 @@ def consumo_cliente(cliente_id, ano_mes=None):
 
 MOTIVOS_CONSUMO = ['Limpeza', 'Lanches da equipe', 'Embalagens e insumos operacionais (sacola, saco, filme)', 'Consumo pessoal/família', 'Outro']
 
+# Classificação gerencial do consumo interno: separa o que é custo de operação
+# da loja, o que é alimentação da equipe e o que é retirada pessoal/família.
+GRUPOS_CONSUMO = {
+    'Limpeza': 'operacional',
+    'Embalagens e insumos operacionais (sacola, saco, filme)': 'operacional',
+    'Lanches da equipe': 'equipe',
+    'Consumo pessoal/família': 'pessoal',
+    'Outro': 'outro',
+}
+NOMES_GRUPO_CONSUMO = {'operacional': 'Operacional', 'equipe': 'Equipe',
+                       'pessoal': 'Pessoal/família', 'outro': 'Outro'}
+
+
+def grupo_consumo(motivo):
+    return GRUPOS_CONSUMO.get(motivo, 'outro')
+
 def registrar_consumo_interno(itens,motivo='',observacao='',responsavel=None,centro_custo='',chave=None):
     try:
         return g.registrar_baixa(itens,motivo,observacao,False,responsavel,centro_custo,chave)

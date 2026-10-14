@@ -646,18 +646,139 @@ class GestaoMixin:
 
     def _abrir_registrar_producao(self):
         import producao
-        receitas=producao.listar_receitas()
+        import app as _app
+        COR = _app.COR
+        FONTE = _app.FONTE
+        receitas = producao.listar_receitas()
         if not receitas:
-            messagebox.showinfo('Produção','Cadastre primeiro uma receita com insumos e rendimento.'); return
-        opcoes=[f"{r['id']} — {r['nome']}" for r in receitas]
-        # Chave estável por abertura do formulário: duplo clique/reenvio não
-        # gera duas produções.
-        chave=uuid.uuid4().hex
-        def salvar(v):
-            r=g.registrar_producao(int(v['receita'].split(' — ')[0]),v['multiplicador'],v['observacao'],v['validade'],v['rendimento'] or None,v['responsavel'],chave=chave)
-            self._toast(f"Produção #{r['id']}: {r['quantidade_produzida']:g} de {r['produto_nome']}; custo unitário {self._moeda(r['custo_unitario'])}.")
-        self._formulario('Registrar produção de alimentos',[('receita','Receita',opcoes[0],opcoes),('multiplicador','Quantas vezes a receita foi utilizada','1',None),('rendimento','Quantidade final real (vazio = rendimento da receita)','',None),('validade','Validade do produto final','',None),('responsavel','Responsável',g.USUARIO,None),('observacao','Observações / qualidade','',None)],salvar,
-                         'Insumos são baixados por lote válido. O rendimento real define o custo unitário e a entrada do lote produzido; a venda posterior baixa apenas o produto final.')
+            messagebox.showinfo('Produção', 'Cadastre primeiro uma receita com insumos e rendimento.')
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title('Registrar produção')
+        dlg.geometry('640x640')
+        dlg.configure(bg=COR['branco'])
+        dlg.transient(self)
+        _grab_set_safe(dlg)
+        dlg.bind('<Escape>', lambda e: dlg.destroy())
+
+        tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
+        tk.Label(dlg, text='Registrar produção', bg=COR['branco'], fg=COR['verde2'], font=(FONTE, 15, 'bold')).pack(anchor='w', padx=24, pady=(14, 8))
+
+        def campo(rotulo, valor_inicial='', dica=''):
+            tk.Label(dlg, text=rotulo, bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).pack(anchor='w', padx=24, pady=(8, 2))
+            ent = tk.Entry(dlg, font=(FONTE, 10), relief='solid', bd=1)
+            ent.pack(fill='x', padx=24, ipady=4)
+            if valor_inicial:
+                ent.insert(0, valor_inicial)
+            if dica:
+                tk.Label(dlg, text=dica, bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 7)).pack(anchor='w', padx=24)
+            return ent
+
+        tk.Label(dlg, text='RECEITA', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).pack(anchor='w', padx=24, pady=(8, 2))
+        combo = ttk.Combobox(dlg, state='readonly', font=(FONTE, 10), values=[f"{r['id']} — {r['nome']} ({r['unidade']})" for r in receitas])
+        combo.current(0)
+        combo.pack(fill='x', padx=24)
+
+        ent_mult = campo('QUANTAS VEZES FEZ A RECEITA (ex.: 1, 2, 0.5)', '1')
+        ent_rend = campo('RENDIMENTO REAL (vazio = rendimento da receita)', '', 'Quantidade final obtida de verdade.')
+        ent_val = campo('VALIDADE DO PRODUTO FINAL (AAAA-MM-DD)')
+        ent_resp = campo('RESPONSÁVEL', g.USUARIO)
+        ent_obs = campo('OBSERVAÇÕES / QUALIDADE')
+
+        tk.Label(dlg, text='PRÉVIA (insumos, rendimento e custo)', bg=COR['branco'], fg=COR['verde2'], font=(FONTE, 10, 'bold')).pack(anchor='w', padx=24, pady=(12, 2))
+        lbl_previa = tk.Label(dlg, text='', bg=COR['zebra'], fg=COR['verde2'], font=('Consolas', 9), justify='left',
+                              anchor='nw', wraplength=580)
+        lbl_previa.pack(fill='both', expand=True, padx=24, pady=(0, 8), ipady=6)
+        estado = {'faltando': False, 'inativo': False}
+
+        def atualizar_previa(*_):
+            r = receitas[combo.current()]
+            mult = self._para_float(ent_mult.get(), 0)
+            if mult <= 0:
+                lbl_previa.config(text='Informe um multiplicador maior que zero.')
+                estado['faltando'] = estado['inativo'] = False
+                return
+            linhas, custo_total, sem_custo = [], 0.0, 0
+            faltando = inativo = False
+            for it in r['itens']:
+                p = op.obter_produto(it['insumo_id'])
+                if not p:
+                    linhas.append(f"  ⚠ insumo {it['insumo_id']} não encontrado")
+                    faltando = True
+                    continue
+                nec = round(it['quantidade'] * mult, 4)
+                disp = p['quantidade_estoque']
+                custo = p['preco_custo']
+                if custo and custo > 0:
+                    custo_total += nec * custo
+                else:
+                    sem_custo += 1
+                if not p['ativo']:
+                    inativo = True
+                ok = (disp + 1e-6) >= nec and p['ativo']
+                if not ok:
+                    faltando = True
+                custo_txt = self._moeda(custo) if (custo and custo > 0) else 'custo desconhecido'
+                linhas.append(f"  {p['nome']}: precisa {nec:g} {p['unidade']} · disponível {disp:g} · {custo_txt}"
+                              + ('' if ok else '  ⚠'))
+            rend_prev = round(r['rendimento'] * mult, 3)
+            rend_real = self._para_float(ent_rend.get(), 0) or rend_prev
+            texto = (f"Rendimento previsto: {rend_prev:g} {r['unidade']}   ·   real: {rend_real:g} {r['unidade']}\n"
+                     + '\n'.join(linhas)
+                     + f"\nCusto estimado dos insumos: {self._moeda(custo_total)}"
+                     + (f"  (+{sem_custo} insumo(s) sem custo)" if sem_custo else ''))
+            if faltando:
+                texto += '\n⚠ Há insumo com saldo insuficiente ou inativo — a produção será rejeitada.'
+            lbl_previa.config(text=texto)
+            estado['faltando'] = faltando
+            estado['inativo'] = inativo
+
+        combo.bind('<<ComboboxSelected>>', atualizar_previa)
+        for e in (ent_mult, ent_rend):
+            e.bind('<KeyRelease>', atualizar_previa)
+        atualizar_previa()
+
+        # Chave estável por abertura do formulário: duplo clique/reenvio não gera duas produções.
+        chave = uuid.uuid4().hex
+
+        def registrar():
+            mult = self._para_float(ent_mult.get(), 0)
+            if mult <= 0:
+                messagebox.showerror('Produção', 'Informe quantas vezes a receita foi feita.', parent=dlg)
+                return
+            if estado['faltando']:
+                messagebox.showerror('Produção',
+                                     'Não dá para produzir: há insumo com saldo insuficiente ou inativo.\n'
+                                     'Reponha o insumo ou ajuste o multiplicador.', parent=dlg)
+                return
+            validade = ent_val.get().strip()
+            if not validade:
+                messagebox.showerror('Produção', 'Informe a validade do produto final.', parent=dlg)
+                return
+            try:
+                g.data_iso(validade)
+            except Exception:
+                messagebox.showerror('Produção', 'Validade inválida (use AAAA-MM-DD).', parent=dlg)
+                return
+            receita_id = int(combo.get().split(' — ')[0])
+            try:
+                r = g.registrar_producao(receita_id, mult, ent_obs.get().strip(), validade,
+                                         self._para_float(ent_rend.get(), 0) or None,
+                                         ent_resp.get().strip() or g.USUARIO, chave=chave)
+            except Exception as exc:
+                messagebox.showerror('Produção', str(exc), parent=dlg)
+                return
+            dlg.destroy()
+            self._toast(f"Produção #{r['id']}: {r['quantidade_produzida']:g} de {r['produto_nome']}; "
+                        f"custo unitário {self._moeda(r['custo_unitario'])}.")
+            self._carrega_producao()
+            self._carrega_produtos()
+
+        botoes = tk.Frame(dlg, bg=COR['branco'])
+        botoes.pack(fill='x', padx=24, pady=(4, 16), side='bottom')
+        ttk.Button(botoes, text='REGISTRAR PRODUÇÃO', style='Primary.TButton', command=registrar).pack(side='right')
+        ttk.Button(botoes, text='Cancelar', style='Secondary.TButton', command=dlg.destroy).pack(side='right', padx=6)
 
     def _abrir_novo_lote_global(self):
         # Cadastro de validade para estoque existente; nova compra usa recebimento integrado.
@@ -726,8 +847,15 @@ class GestaoMixin:
     def _consumo_recorrente_ui(self):
         produtos=self._produtos_opcoes()
         if not produtos: raise g.ErroGestao('Cadastre os produtos primeiro.')
-        self._formulario('Consumo interno confirmado',[('produto','Produto',produtos[0],produtos),('quantidade','Quantidade efetivamente utilizada','',None),('motivo','Finalidade','Limpeza',['Limpeza','Lanches da equipe','Embalagens','Uso operacional','Outros']),('centro','Centro de custo (opcional)','',None),('observacao','Observação / referência do período','',None)],
-                         lambda v:g.registrar_baixa([dict(produto_id=int(v['produto'].split(' — ')[0]),quantidade=v['quantidade'])],v['motivo'],v['observacao'],False,g.USUARIO,v['centro']),
+        # Chave estável por abertura do formulário: duplo clique/reenvio não
+        # gera dois consumos. Motivos iguais aos da aba Consumo interno, para a
+        # classificação gerencial (operacional/equipe/pessoal) ficar consistente.
+        chave=uuid.uuid4().hex
+        def salvar(v):
+            g.registrar_baixa([dict(produto_id=int(v['produto'].split(' — ')[0]),quantidade=v['quantidade'])],
+                              v['motivo'],v['observacao'],False,g.USUARIO,v['centro'],chave)
+        self._formulario('Consumo interno confirmado',[('produto','Produto',produtos[0],produtos),('quantidade','Quantidade efetivamente utilizada','',None),('motivo','Finalidade',op.MOTIVOS_CONSUMO[0],op.MOTIVOS_CONSUMO),('centro','Centro de custo (opcional)','',None),('observacao','Observação / referência do período','',None)],
+                         salvar,
                          'Use os totais mensais como referência, mas confirme a quantidade real. O sistema não baixa estoque automaticamente por estimativa.')
 
     def _relatorio_operacional(self):

@@ -780,6 +780,18 @@ class App(GestaoMixin, tk.Tk):
             pass
         return f'R$ {valor:,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.')
 
+    def _texto_custo(self, valor):
+        """Mostra o custo, ou 'custo desconhecido' quando não há custo confiável
+        (<= 0) — para não confundir desconhecido com custo econômico zero."""
+        try:
+            v = float(valor or 0)
+        except (TypeError, ValueError):
+            return 'custo desconhecido'
+        return self._moeda(v) if v > 0 else 'custo desconhecido'
+
+    def _itens_sem_custo(self, itens):
+        return sum(1 for i in itens if float(i.get('preco_custo') or 0) <= 0)
+
     def _busca_tecla(self, event):
         if event.keysym in ('Return', 'Up', 'Down'):
             return
@@ -1916,7 +1928,7 @@ class App(GestaoMixin, tk.Tk):
             try:
                 obs = f'Lote vencido em {lote["data_validade"]}' if lote['data_validade'] else 'Lote sem validade definida'
                 op.registrar_perda([{'produto_id': lote['produto_id'], 'quantidade': lote['quantidade'], 'lote_id': lote['lote_id']}],
-                                    'Validade vencida', obs)
+                                    'Validade vencida', obs, chave=f'perda_lote_{lote["lote_id"]}')
                 recarregar()
                 self._carrega_produtos()
                 self._carrega_resumo_perda()
@@ -2687,8 +2699,17 @@ class App(GestaoMixin, tk.Tk):
         tk.Label(esquerda, text='MOTIVO', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).grid(row=3, column=0, sticky='w', padx=16, pady=(4, 2))
         self.combo_motivo_consumo = ttk.Combobox(esquerda, values=op.MOTIVOS_CONSUMO, font=(FONTE, 9))
         self.combo_motivo_consumo.set(op.MOTIVOS_CONSUMO[0])
-        self.combo_motivo_consumo.grid(row=4, column=0, sticky='ew', padx=16, pady=(0, 6))
+        self.combo_motivo_consumo.grid(row=4, column=0, sticky='ew', padx=16, pady=(0, 2))
         _uppercase_ao_digitar(self.combo_motivo_consumo)
+        # Mostra a que grupo gerencial o motivo pertence (operacional/equipe/pessoal).
+        self.lbl_grupo_consumo = tk.Label(esquerda, text='', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'italic'))
+        self.lbl_grupo_consumo.grid(row=4, column=0, sticky='e', padx=16, pady=(0, 6))
+
+        def _atualiza_grupo_consumo(_=None):
+            grupo = op.grupo_consumo(self.combo_motivo_consumo.get().strip())
+            self.lbl_grupo_consumo.config(text=f"Classificação: {op.NOMES_GRUPO_CONSUMO.get(grupo, 'Outro')}")
+        self.combo_motivo_consumo.bind('<<ComboboxSelected>>', _atualiza_grupo_consumo)
+        _atualiza_grupo_consumo()
 
         tk.Label(esquerda, text='OBSERVAÇÃO (OPCIONAL)', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).grid(row=5, column=0, sticky='w', padx=16, pady=(4, 2))
         self.entrada_obs_consumo = tk.Entry(esquerda, font=(FONTE, 10), relief='solid', bd=1,
@@ -2966,11 +2987,13 @@ class App(GestaoMixin, tk.Tk):
         ja_no_carrinho = existente['quantidade'] if existente else 0
         disponivel = float(produto['quantidade_estoque']) - ja_no_carrinho
         if qtd > disponivel + 0.001:
-            if not messagebox.askyesno('Estoque insuficiente',
-                    f'Estoque atual de {produto["nome"]}: {self._formatq(produto["quantidade_estoque"], produto["unidade"])}\n'
-                    f'Já no carrinho deste consumo: {self._formatq(ja_no_carrinho, produto["unidade"])}\n\n'
-                    f'Deseja adicionar mesmo assim?'):
-                return
+            # O serviço bloqueia baixa sem saldo — então não oferecemos "mesmo
+            # assim": mostramos a causa e como resolver.
+            messagebox.showwarning('Estoque insuficiente',
+                                   f"Disponível de {produto['nome']}: {self._formatq(max(0, disponivel), produto['unidade'])}.\n"
+                                   'Registre a entrada/inventário do produto ou ajuste a quantidade antes de consumir.',
+                                   parent=self)
+            return
         if existente:
             existente['quantidade'] = round(existente['quantidade'] + qtd, 3)
         else:
@@ -2994,16 +3017,18 @@ class App(GestaoMixin, tk.Tk):
                     selecionar_idx = idx_sel
         self.tree_consumo.delete(*self.tree_consumo.get_children())
         for i, item in enumerate(self.carrinho_consumo):
-            subtotal = item['quantidade'] * item['preco_custo']
             tag = 'par' if i % 2 == 0 else 'impar'
+            custo_txt = (self._moeda(item['quantidade'] * item['preco_custo'])
+                         if float(item.get('preco_custo') or 0) > 0 else 'custo desconhecido')
             self.tree_consumo.insert('', 'end', iid=str(i), tags=(tag,),
-                                      values=(item['nome'], self._formatq(item['quantidade'], item['unidade']), self._moeda(subtotal)))
+                                      values=(item['nome'], self._formatq(item['quantidade'], item['unidade']), custo_txt))
         if selecionar_idx is not None and selecionar_idx < len(self.carrinho_consumo):
             self.tree_consumo.selection_set(str(selecionar_idx))
             self.tree_consumo.focus(str(selecionar_idx))
             self.tree_consumo.see(str(selecionar_idx))
         total = sum(i['quantidade'] * i['preco_custo'] for i in self.carrinho_consumo)
-        self.lbl_total_consumo.config(text=self._moeda(total))
+        sem_custo = self._itens_sem_custo(self.carrinho_consumo)
+        self.lbl_total_consumo.config(text=self._moeda(total) + (f'  (+{sem_custo} sem custo)' if sem_custo else ''))
 
     def _alterar_qtd_consumo(self, delta):
         self._chave_consumo = None
@@ -3033,12 +3058,17 @@ class App(GestaoMixin, tk.Tk):
         motivo = self.combo_motivo_consumo.get().strip()
         observacao = self.entrada_obs_consumo.get().strip()
         total = sum(i['quantidade'] * i['preco_custo'] for i in self.carrinho_consumo)
-        itens_txt = '\n'.join(f"  {item['nome']}  x{item['quantidade']:.3g}  =  {self._moeda(item['quantidade'] * item['preco_custo'])}" for item in self.carrinho_consumo)
+        sem_custo = self._itens_sem_custo(self.carrinho_consumo)
+        itens_txt = '\n'.join(
+            f"  {item['nome']}  x{item['quantidade']:.3g}  =  "
+            f"{self._moeda(item['quantidade'] * item['preco_custo']) if float(item.get('preco_custo') or 0) > 0 else 'custo desconhecido'}"
+            for item in self.carrinho_consumo)
+        aviso_custo = f"\n⚠ {sem_custo} item(ns) sem custo conhecido — o total fica parcial.\n" if sem_custo else '\n'
         if not messagebox.askyesno('Confirmar consumo interno',
                 f"Itens ({len(self.carrinho_consumo)}):\n{itens_txt}\n\n"
                 f"Total (custo): {self._moeda(total)}\n"
-                f"Motivo: {motivo or 'Não informado'}\n\n"
-                f"Baixar do estoque?"):
+                f"Finalidade: {motivo or 'Não informado'} ({op.NOMES_GRUPO_CONSUMO.get(op.grupo_consumo(motivo), 'Outro')})\n"
+                f"{aviso_custo}Baixar do estoque?"):
             return
         itens = [{'produto_id': i['produto_id'], 'quantidade': i['quantidade']} for i in self.carrinho_consumo]
         chave = getattr(self, '_chave_consumo', None) or uuid.uuid4().hex
@@ -3339,6 +3369,60 @@ class App(GestaoMixin, tk.Tk):
             self.qtd_perda.delete(0, 'end')
             self.qtd_perda.insert(0, '1')
 
+    def _escolher_lote_perda(self, produto):
+        """Deixa o operador escolher o lote físico perdido (ou nenhum = FEFO).
+        Devolve {'lote_id','validade','quantidade'} ou None se cancelar."""
+        lotes = val.lotes_produto(produto['id'])
+        if not lotes:
+            return {'lote_id': None, 'validade': None, 'quantidade': None}
+        dlg = tk.Toplevel(self)
+        dlg.title(f'Lote de {produto["nome"]}')
+        dlg.geometry('540x430')
+        dlg.configure(bg=COR['branco'])
+        dlg.transient(self)
+        _grab_set_safe(dlg)
+        dlg.bind('<Escape>', lambda e: dlg.destroy())
+        tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
+        tk.Label(dlg, text=f'Qual lote de {produto["nome"]} foi perdido?', bg=COR['branco'], fg=COR['verde2'],
+                 font=(FONTE, 13, 'bold')).pack(anchor='w', padx=20, pady=(14, 2))
+        tk.Label(dlg, text='Se houver mais de um lote, registre uma perda por lote. Lote vencido pode ser baixado como perda aqui.',
+                 bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8), wraplength=490, justify='left').pack(anchor='w', padx=20, pady=(0, 8))
+        tv = ttk.Treeview(dlg, columns=('validade', 'qtd'), show='headings', height=9)
+        tv.heading('validade', text='Validade')
+        tv.heading('qtd', text='Saldo do lote')
+        tv.column('validade', width=220)
+        tv.column('qtd', width=130, anchor='e')
+        tv.tag_configure('vencido', foreground=COR['vermelho'])
+        tv.pack(fill='both', expand=True, padx=20)
+        hoje = date.today().isoformat()
+        for i, l in enumerate(lotes):
+            data = l['data_validade'] or 'sem validade'
+            vencido = bool(l['data_validade'] and l['data_validade'] < hoje)
+            tv.insert('', 'end', iid=str(i), tags=(('vencido',) if vencido else ()),
+                      values=(f"{data}{' (VENCIDO)' if vencido else ''}", self._formatq(l['quantidade'], produto['unidade'])))
+        resultado = {}
+
+        def confirmar():
+            sel = tv.selection()
+            if not sel:
+                messagebox.showinfo('Lote', 'Escolha um lote na lista.', parent=dlg)
+                return
+            l = lotes[int(sel[0])]
+            resultado.update({'lote_id': l['id'], 'validade': l['data_validade'], 'quantidade': l['quantidade']})
+            dlg.destroy()
+
+        def sem_lote():
+            resultado.update({'lote_id': None, 'validade': None, 'quantidade': None})
+            dlg.destroy()
+
+        botoes = tk.Frame(dlg, bg=COR['branco'])
+        botoes.pack(fill='x', padx=20, pady=14)
+        ttk.Button(botoes, text='Usar lote selecionado', style='Primary.TButton', command=confirmar).pack(side='right')
+        ttk.Button(botoes, text='Sem lote específico (FEFO)', style='Secondary.TButton', command=sem_lote).pack(side='right', padx=6)
+        ttk.Button(botoes, text='Cancelar', style='Secondary.TButton', command=dlg.destroy).pack(side='right')
+        self.wait_window(dlg)
+        return resultado or None
+
     def _adicionar_perda(self, produto, qtd=None):
         if qtd is None:
             if produto['unidade'] == 'KG':
@@ -3352,21 +3436,37 @@ class App(GestaoMixin, tk.Tk):
             messagebox.showwarning('Quantidade', 'Informe uma quantidade maior que zero.')
             return
         qtd = round(float(qtd), 3)
-        existente = next((i for i in self.carrinho_perda if i['produto_id'] == produto['id']), None)
-        ja_no_carrinho = existente['quantidade'] if existente else 0
-        disponivel = float(produto['quantidade_estoque']) - ja_no_carrinho
+        escolha = self._escolher_lote_perda(produto)
+        if escolha is None:
+            return
+        lote_id, validade, qtd_lote = escolha['lote_id'], escolha['validade'], escolha['quantidade']
+        if lote_id is not None and qtd > qtd_lote + 0.001:
+            messagebox.showwarning('Lote',
+                                   f"O lote selecionado tem {self._formatq(qtd_lote, produto['unidade'])}. "
+                                   'Reduza a quantidade ou registre a perda em outro lote.', parent=self)
+            return
+        if lote_id is None:
+            ja_no_carrinho = sum(i['quantidade'] for i in self.carrinho_perda if i['produto_id'] == produto['id'])
+            disponivel = float(produto['quantidade_estoque']) - ja_no_carrinho
+        else:
+            ja_no_carrinho = sum(i['quantidade'] for i in self.carrinho_perda
+                                 if i['produto_id'] == produto['id'] and i.get('lote_id') == lote_id)
+            disponivel = float(qtd_lote) - ja_no_carrinho
         if qtd > disponivel + 0.001:
-            if not messagebox.askyesno('Estoque insuficiente',
-                    f'Estoque atual de {produto["nome"]}: {self._formatq(produto["quantidade_estoque"], produto["unidade"])}\n'
-                    f'Já no carrinho desta perda: {self._formatq(ja_no_carrinho, produto["unidade"])}\n\n'
-                    f'Deseja registrar a perda mesmo assim?'):
-                return
+            messagebox.showwarning('Estoque insuficiente',
+                                   f"Disponível de {produto['nome']}: {self._formatq(max(0, disponivel), produto['unidade'])}.\n"
+                                   'Registre a entrada/inventário do produto ou ajuste a quantidade — a perda não '
+                                   'pode deixar o estoque negativo.', parent=self)
+            return
+        existente = next((i for i in self.carrinho_perda
+                          if i['produto_id'] == produto['id'] and i.get('lote_id') == lote_id), None)
         if existente:
             existente['quantidade'] = round(existente['quantidade'] + qtd, 3)
         else:
             self.carrinho_perda.append({
                 'produto_id': produto['id'], 'nome': produto['nome'],
                 'preco_custo': produto['preco_custo'], 'quantidade': qtd, 'unidade': produto['unidade'],
+                'lote_id': lote_id, 'validade': validade,
             })
         self._render_carrinho_perda()
 
@@ -3384,16 +3484,23 @@ class App(GestaoMixin, tk.Tk):
                     selecionar_idx = idx_sel
         self.tree_perda.delete(*self.tree_perda.get_children())
         for i, item in enumerate(self.carrinho_perda):
-            subtotal = item['quantidade'] * item['preco_custo']
             tag = 'par' if i % 2 == 0 else 'impar'
+            lote_txt = ''
+            if item.get('lote_id'):
+                lote_txt = f"  ·  lote {item.get('validade') or 'sem validade'}"
+            if float(item.get('preco_custo') or 0) > 0:
+                custo_txt = self._moeda(item['quantidade'] * item['preco_custo'])
+            else:
+                custo_txt = 'custo desconhecido'
             self.tree_perda.insert('', 'end', iid=str(i), tags=(tag,),
-                                      values=(item['nome'], self._formatq(item['quantidade'], item['unidade']), self._moeda(subtotal)))
+                                      values=(f"{item['nome']}{lote_txt}", self._formatq(item['quantidade'], item['unidade']), custo_txt))
         if selecionar_idx is not None and selecionar_idx < len(self.carrinho_perda):
             self.tree_perda.selection_set(str(selecionar_idx))
             self.tree_perda.focus(str(selecionar_idx))
             self.tree_perda.see(str(selecionar_idx))
         total = sum(i['quantidade'] * i['preco_custo'] for i in self.carrinho_perda)
-        self.lbl_total_perda.config(text=self._moeda(total))
+        sem_custo = self._itens_sem_custo(self.carrinho_perda)
+        self.lbl_total_perda.config(text=self._moeda(total) + (f'  (+{sem_custo} sem custo)' if sem_custo else ''))
 
     def _alterar_qtd_perda(self, delta):
         self._chave_perda = None
@@ -3423,14 +3530,23 @@ class App(GestaoMixin, tk.Tk):
         motivo = self.combo_motivo_perda.get().strip()
         observacao = self.entrada_obs_perda.get().strip()
         total = sum(i['quantidade'] * i['preco_custo'] for i in self.carrinho_perda)
-        itens_txt = '\n'.join(f"  {item['nome']}  x{item['quantidade']:.3g}  =  {self._moeda(item['quantidade'] * item['preco_custo'])}" for item in self.carrinho_perda)
+        sem_custo = self._itens_sem_custo(self.carrinho_perda)
+
+        def linha(i):
+            lote = f" [lote {i.get('validade') or 'sem validade'}]" if i.get('lote_id') else ''
+            custo = self._moeda(i['quantidade'] * i['preco_custo']) if float(i.get('preco_custo') or 0) > 0 else 'custo desconhecido'
+            return f"  {i['nome']}{lote}  x{i['quantidade']:.3g}  =  {custo}"
+
+        itens_txt = '\n'.join(linha(i) for i in self.carrinho_perda)
+        aviso_custo = f"\n⚠ {sem_custo} item(ns) sem custo conhecido — o total fica parcial.\n" if sem_custo else '\n'
         if not messagebox.askyesno('Confirmar perda',
                 f"Itens ({len(self.carrinho_perda)}):\n{itens_txt}\n\n"
                 f"Total (prejuízo): {self._moeda(total)}\n"
-                f"Motivo: {motivo or 'Não informado'}\n\n"
+                f"Motivo: {motivo or 'Não informado'}\n{aviso_custo}"
                 f"Baixar do estoque e registrar como perda?"):
             return
-        itens = [{'produto_id': i['produto_id'], 'quantidade': i['quantidade']} for i in self.carrinho_perda]
+        itens = [{'produto_id': i['produto_id'], 'quantidade': i['quantidade'], 'lote_id': i.get('lote_id')}
+                 for i in self.carrinho_perda]
         chave = getattr(self, '_chave_perda', None) or uuid.uuid4().hex
         self._chave_perda = chave
         try:
@@ -5322,7 +5438,7 @@ class App(GestaoMixin, tk.Tk):
         try:
             obs = f'Lote vencido em {lote["data_validade"]}' if lote['data_validade'] else 'Lote sem validade definida'
             op.registrar_perda([{'produto_id': lote['produto_id'], 'quantidade': lote['quantidade'], 'lote_id': lote_id}],
-                                'Validade vencida', obs)
+                                'Validade vencida', obs, chave=f'perda_lote_{lote_id}')
             self._carrega_estoque()
             self._carrega_produtos()
             self._carrega_resumo_perda()

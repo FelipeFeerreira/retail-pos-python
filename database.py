@@ -6,9 +6,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'mercadinho.db')
 SCHEMA_PATH = os.path.join(BASE_DIR, 'schema.sql')
 
-# Versão do esquema. Sempre que aumentar, o init_db faz um backup consistente
-# do banco antes de aplicar qualquer mudança (migração não destrutiva).
-SCHEMA_VERSAO = 2
+# Versão do esquema. IMPORTANTE: sempre que uma migração alterar o esquema
+# (nova coluna, tabela ou índice), AUMENTE este número. É a comparação
+# `versao_gravada < SCHEMA_VERSAO` que dispara o backup pré-migração — se a
+# versão não mudar, instalações que já estão nela migram SEM backup.
+# Histórico: v1 = migração de gestão inicial; v2 = venda_pagamentos;
+# v3 = chave de idempotência em consumo_interno, perdas e producoes.
+SCHEMA_VERSAO = 3
 
 
 def _backup_antes_migracao():

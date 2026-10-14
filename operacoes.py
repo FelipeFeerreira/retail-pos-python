@@ -26,19 +26,21 @@ def buscar_por_codigo(codigo):
         r=conn.execute('SELECT * FROM produtos WHERE (codigo_barras=? OR sku=?) AND ativo=1',(str(codigo or '').strip(),str(codigo or '').strip())).fetchone(); return dict(r) if r else None
     finally: conn.close()
 
-def criar_produto(nome,codigo_barras=None,categoria=None,unidade='UN',preco_custo=0,preco_venda=0,quantidade_estoque=0,estoque_minimo=3):
+def criar_produto(nome,codigo_barras=None,categoria=None,unidade='UN',preco_custo=0,preco_venda=0,quantidade_estoque=0,estoque_minimo=3,custo_conhecido=None):
     g.permitir('estoque')
     nome=(nome or '').strip()
     g.validar_codigo(codigo_barras)
     if not nome: raise ErroOperacao('Informe o nome do produto.')
     if unidade not in ('UN','KG'): unidade='UN'
     if any(v<0 for v in (preco_custo,preco_venda,quantidade_estoque,estoque_minimo)): raise ErroOperacao('Valores negativos não são permitidos.')
+    # Custo conhecido: informado explicitamente, ou deduzido (custo > 0).
+    conhecido = int(bool(custo_conhecido)) if custo_conhecido is not None else (1 if (preco_custo or 0) > 0 else 0)
     conn=db.get_conn()
     try:
         conn.execute('BEGIN IMMEDIATE')
         if any(g.normalizar(r['nome'])==g.normalizar(nome) for r in conn.execute('SELECT nome FROM produtos WHERE ativo=1')):
             raise ErroOperacao('Já existe um produto com esse nome. Confira unidade/embalagem e use um nome distinto.')
-        try: cur=conn.execute('INSERT INTO produtos(codigo_barras,nome,categoria,unidade,preco_custo,preco_venda,quantidade_estoque,estoque_minimo) VALUES(?,?,?,?,?,?,?,?)',(codigo_barras or None,nome,categoria or None,unidade,preco_custo,preco_venda,quantidade_estoque,estoque_minimo))
+        try: cur=conn.execute('INSERT INTO produtos(codigo_barras,nome,categoria,unidade,preco_custo,preco_venda,quantidade_estoque,estoque_minimo,custo_conhecido) VALUES(?,?,?,?,?,?,?,?,?)',(codigo_barras or None,nome,categoria or None,unidade,preco_custo,preco_venda,quantidade_estoque,estoque_minimo,conhecido))
         except sqlite3.IntegrityError: raise ErroOperacao('Já existe um produto com esse código de barras.')
         pid=cur.lastrowid
         conn.execute('UPDATE produtos SET sku=? WHERE id=?',(f'INT-{pid:06d}',pid))
@@ -47,7 +49,7 @@ def criar_produto(nome,codigo_barras=None,categoria=None,unidade='UN',preco_cust
         conn.commit(); return pid
     finally: conn.close()
 
-def atualizar_produto(produto_id,nome=None,codigo_barras=None,categoria=None,unidade=None,preco_custo=None,preco_venda=None,estoque_minimo=None):
+def atualizar_produto(produto_id,nome=None,codigo_barras=None,categoria=None,unidade=None,preco_custo=None,preco_venda=None,estoque_minimo=None,custo_conhecido=None):
     g.permitir('estoque')
     conn=db.get_conn()
     try:
@@ -62,6 +64,13 @@ def atualizar_produto(produto_id,nome=None,codigo_barras=None,categoria=None,uni
         novo_minimo=estoque_minimo if estoque_minimo is not None else p['estoque_minimo']
         if not str(novo_nome).strip(): raise ErroOperacao('Informe o nome do produto.')
         if any(v is not None and v<0 for v in (novo_custo,novo_venda,novo_minimo)): raise ErroOperacao('Valores negativos não são permitidos.')
+        # Custo conhecido: explícito, ou deduzido do custo informado.
+        if custo_conhecido is not None:
+            novo_conhecido = int(bool(custo_conhecido))
+        elif preco_custo is not None:
+            novo_conhecido = 1 if (novo_custo or 0) > 0 else int(p['custo_conhecido'] or 0)
+        else:
+            novo_conhecido = int(p['custo_conhecido'] or 0)
         if novo_codigo != p['codigo_barras']:
             g.validar_codigo(novo_codigo)
         if novo_venda != p['preco_venda']:
@@ -69,8 +78,8 @@ def atualizar_produto(produto_id,nome=None,codigo_barras=None,categoria=None,uni
         g.auditar(conn,'editar','produto',produto_id,{'antes':dict(p),'nome':novo_nome,'preco':novo_venda})
         try:
             conn.execute(
-                'UPDATE produtos SET codigo_barras=?,nome=?,categoria=?,unidade=?,preco_custo=?,preco_venda=?,estoque_minimo=? WHERE id=?',
-                (novo_codigo,novo_nome,nova_categoria,nova_unidade,novo_custo,novo_venda,novo_minimo,produto_id)
+                'UPDATE produtos SET codigo_barras=?,nome=?,categoria=?,unidade=?,preco_custo=?,preco_venda=?,estoque_minimo=?,custo_conhecido=? WHERE id=?',
+                (novo_codigo,novo_nome,nova_categoria,nova_unidade,novo_custo,novo_venda,novo_minimo,novo_conhecido,produto_id)
             )
         except sqlite3.IntegrityError: raise ErroOperacao('Já existe outro produto com esse código de barras.')
         conn.commit()
@@ -420,9 +429,9 @@ NOMES_GRUPO_CONSUMO = g.NOMES_GRUPO_CONSUMO
 def grupo_consumo(motivo):
     return g.grupo_consumo(motivo)
 
-def registrar_consumo_interno(itens,motivo='',observacao='',responsavel=None,centro_custo='',chave=None):
+def registrar_consumo_interno(itens,motivo='',observacao='',responsavel=None,centro_custo='',chave=None,finalidade=''):
     try:
-        return g.registrar_baixa(itens,motivo,observacao,False,responsavel,centro_custo,chave)
+        return g.registrar_baixa(itens,motivo,observacao,False,responsavel,centro_custo,chave,finalidade)
     except g.ErroGestao as exc:
         raise ErroOperacao(str(exc)) from exc
 

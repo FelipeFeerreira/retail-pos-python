@@ -119,3 +119,27 @@ Abrir uma janela é smoke test. Para aceitar um fluxo, pesquise, selecione, pree
 Refatore gradualmente os módulos extensos, sem reescrita ampla no mesmo pacote de correções. Não adicione dependências sem necessidade clara.
 
 Na entrega informe: mudanças e motivo; arquivos; comandos realmente executados e resultado; testes não executados e impedimento; migrações/rollback; pendências e riscos concretos. Não declare trabalho integralmente concluído enquanto etapas solicitadas estiverem pendentes. Só afirme commit/push/publicação após confirmar a ação correspondente; siga a autorização do usuário para essas ações.
+
+## 10. Reformulação ampla autorizada (interface e arquitetura)
+
+A reformulação ampla da interface, da navegação e da organização do código em
+módulos (domínio/serviços/repositórios/relatórios/interface/infraestrutura)
+está **autorizada**. Isso prevalece sobre a orientação anterior de limitar
+alterações a pequenas correções, mas **não** autoriza:
+
+- apagar histórico, auditoria, vendas, fiado, lotes, custos ou contas;
+- substituir o banco por um banco vazio ou recriar dados;
+- reduzir preservação de dados, migrações versionadas com backup, testes ou
+  comprovação de entrega das seções 3–9.
+
+Regras mantidas durante a reformulação:
+
+- banco operacional intacto; desenvolvimento e testes em banco temporário;
+  migração avaliada em cópia consistente (API de backup, origem só-leitura);
+- uma única aplicação coerente ao final — não manter duas interfaces
+  concorrentes com regras duplicadas, nem execução simultânea sobre o mesmo
+  banco;
+- regras e permissões no serviço (não só na interface); totais e detalhes
+  usam a mesma fonte; idempotência com checagem de conteúdo;
+- SQL e regras financeiras não duplicadas em callbacks;
+- relato honesto: o que funciona, o que não foi testado e o que falta.

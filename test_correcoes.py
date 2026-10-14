@@ -448,6 +448,91 @@ class ResultadoGerencialTest(BaseTemp):
         self.assertEqual(op.obter_produto(self.p2)['quantidade_estoque'], 100)
 
 
+class DefeitosReformulacaoTest(BaseTemp):
+    """Regressões dos defeitos identificados na análise de reformulação."""
+
+    def setUp(self):
+        super().setUp()
+        g.abrir_caixa(0)
+        g.salvar_politica(None, 500, 30, 0, 0)
+        self.hoje = date.today().isoformat()
+
+    def test_d1_custo_desconhecido_marca_parcial(self):
+        p = op.criar_produto('BONIF', preco_custo=0, preco_venda=10, quantidade_estoque=10)
+        op.registrar_venda([{'produto_id': p, 'quantidade': 1}], 'dinheiro')
+        r = g.resultado_gerencial(self.hoje, self.hoje)
+        self.assertTrue(r['parcial'], 'custo desconhecido deve marcar resultado parcial')
+        self.assertTrue(any('venda' in x.lower() for x in r['pendencias']))
+        # Produto com custo conhecido entra no CMV normalmente.
+        p2 = op.criar_produto('OK', preco_custo=6, preco_venda=10, quantidade_estoque=10)
+        op.registrar_venda([{'produto_id': p2, 'quantidade': 1}], 'dinheiro')
+        self.assertEqual(g.resultado_gerencial(self.hoje, self.hoje)['cmv'], 6)
+
+    def test_d2_taxas_total_igual_detalhe(self):
+        p = op.criar_produto('CARD', preco_custo=5, preco_venda=10, quantidade_estoque=100)
+        op.registrar_venda([{'produto_id': p, 'quantidade': 10}], 'cartao_debito', taxa_paga=0)
+        rec = g.consultar("SELECT id FROM recebiveis_cartao WHERE origem='venda'")[0]['id']
+        g.liquidar_cartao(rec, conta_id=2, taxa=1.0)
+        total = g.resultado_gerencial(self.hoje, self.hoje)['taxas']
+        detalhe = g.componentes_taxas(self.hoje, self.hoje)
+        self.assertEqual(total, 1.0)
+        self.assertAlmostEqual(sum(i['valor'] for i in detalhe), total, 2)
+        self.assertEqual(g.lancamentos_componente('taxas', self.hoje, self.hoje), detalhe)
+
+    def test_d3_retirada_familiar_unificada(self):
+        p = op.criar_produto('P', preco_custo=5, preco_venda=8, quantidade_estoque=100)
+        op.registrar_consumo_interno([{'produto_id': p, 'quantidade': 4}], 'Limpeza', finalidade='operacional')
+        op.registrar_consumo_interno([{'produto_id': p, 'quantidade': 8}], 'Consumo pessoal/família', finalidade='pessoal')
+        rf = g.resumo_financeiro(self.hoje, self.hoje)
+        rg = g.resultado_gerencial(self.hoje, self.hoje)
+        self.assertEqual(rf['resultado'], rg['resultado_liquido'])
+        self.assertEqual(rf['retiradas_pessoais'], 40)
+        self.assertEqual(rf['resultado_apos_retiradas'], rg['resultado_apos_retiradas'])
+        self.assertEqual(rg['consumo_operacional'], 20)  # pessoal NÃO entra no operacional
+
+    def test_d4_finalidade_estavel_independe_do_texto(self):
+        p = op.criar_produto('P4', preco_custo=1, preco_venda=2, quantidade_estoque=100)
+        op.registrar_consumo_interno([{'produto_id': p, 'quantidade': 3}], 'Texto livre qualquer', finalidade='equipe')
+        r = g.resultado_gerencial(self.hoje, self.hoje)
+        self.assertEqual(r['consumo_equipe'], 3)
+        self.assertEqual(r['consumo_outro'], 0)
+
+    def test_d5_chave_repetida_conteudo_diferente_conflito(self):
+        p = op.criar_produto('P5', preco_custo=1, preco_venda=2, quantidade_estoque=100)
+        op.registrar_consumo_interno([{'produto_id': p, 'quantidade': 5}], 'Limpeza', chave='K')
+        # repetição idêntica é segura
+        op.registrar_consumo_interno([{'produto_id': p, 'quantidade': 5}], 'Limpeza', chave='K')
+        self.assertEqual(op.obter_produto(p)['quantidade_estoque'], 95)
+        with self.assertRaises(op.ErroOperacao):
+            op.registrar_consumo_interno([{'produto_id': p, 'quantidade': 9}], 'Limpeza', chave='K')
+        # venda com chave repetida e itens diferentes
+        op.registrar_venda([{'produto_id': p, 'quantidade': 1}], 'dinheiro', chave_operacao='V1')
+        with self.assertRaises(op.ErroOperacao):
+            op.registrar_venda([{'produto_id': p, 'quantidade': 2}], 'dinheiro', chave_operacao='V1')
+
+    def test_d6_estorno_producao_com_dependencia(self):
+        insumo = op.criar_produto('INS', preco_custo=2, preco_venda=3, quantidade_estoque=100)
+        final = op.criar_produto('FIM', preco_custo=0, preco_venda=10, quantidade_estoque=0)
+        rid = prod.criar_receita(final, rendimento=10, itens=[{'insumo_id': insumo, 'quantidade': 10}])
+        pr = g.registrar_producao(rid, 1, validade=(date.today() + timedelta(days=30)).isoformat())
+        # usa o produto acabado depois -> não pode reverter
+        op.registrar_venda([{'produto_id': final, 'quantidade': 1}], 'dinheiro')
+        with self.assertRaises(g.ErroGestao):
+            g.estornar_producao(pr['id'], 'engano')
+        # sem uso posterior, reverte: insumos voltam, produto acabado sai
+        insumo2 = op.criar_produto('INS2', preco_custo=2, preco_venda=3, quantidade_estoque=100)
+        final2 = op.criar_produto('FIM2', preco_custo=0, preco_venda=10, quantidade_estoque=0)
+        rid2 = prod.criar_receita(final2, rendimento=10, itens=[{'insumo_id': insumo2, 'quantidade': 10}])
+        pr2 = g.registrar_producao(rid2, 1, validade=(date.today() + timedelta(days=30)).isoformat())
+        self.assertEqual(op.obter_produto(final2)['quantidade_estoque'], 10)
+        self.assertEqual(op.obter_produto(insumo2)['quantidade_estoque'], 90)
+        g.estornar_producao(pr2['id'], 'lançado por engano')
+        self.assertEqual(op.obter_produto(final2)['quantidade_estoque'], 0)
+        self.assertEqual(op.obter_produto(insumo2)['quantidade_estoque'], 100)
+        with self.assertRaises(g.ErroGestao):
+            g.estornar_producao(pr2['id'], 'de novo')  # duplicado
+
+
 class BalancaTest(unittest.TestCase):
     def test_protocolos_toledo_8217(self):
         from balanca import LeitorBalanca as L

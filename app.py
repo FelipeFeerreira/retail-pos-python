@@ -1710,6 +1710,11 @@ class App(GestaoMixin, tk.Tk):
         campos['venda'].bind('<KeyRelease>', lambda e: _recalcular_precos('venda'), add='+')
         campos['margem'].bind('<KeyRelease>', lambda e: _recalcular_precos('margem'), add='+')
 
+        var_custo_conhecido = tk.BooleanVar(value=bool(produto.get('custo_conhecido')) if produto else False)
+        tk.Checkbutton(dlg, text='Custo conhecido (marque para custo zero legítimo, ex.: bonificação)',
+                       variable=var_custo_conhecido, bg=COR['branco'], fg=COR['cinza'],
+                       activebackground=COR['branco'], selectcolor=COR['branco'], font=(FONTE, 8)).pack(anchor='w', padx=24, pady=(6, 0))
+
         def salvar():
             nome_val = campos['nome'].get().strip()
             codigo_val = campos['codigo'].get().strip()
@@ -1719,11 +1724,13 @@ class App(GestaoMixin, tk.Tk):
             if codigo_val and not codigo_val.isdigit():
                 messagebox.showerror('Código inválido', 'O código de barras só pode ter números.', parent=dlg)
                 return
+            custo_num = self._para_float(campos['custo'].get(), 0)
+            conhecido = bool(var_custo_conhecido.get()) or custo_num > 0
             try:
                 if produto:
-                    op.atualizar_produto(produto['id'], nome_val, codigo_val or None, campos['categoria'].get(), unidade.get(), self._para_float(campos['custo'].get()), self._para_float(campos['venda'].get()), self._para_float(campos['minimo'].get()))
+                    op.atualizar_produto(produto['id'], nome_val, codigo_val or None, campos['categoria'].get(), unidade.get(), custo_num, self._para_float(campos['venda'].get()), self._para_float(campos['minimo'].get()), custo_conhecido=conhecido)
                 else:
-                    op.criar_produto(nome_val, codigo_val or None, campos['categoria'].get(), unidade.get(), self._para_float(campos['custo'].get()), self._para_float(campos['venda'].get()), self._para_float(campos['estoque'].get()), self._para_float(campos['minimo'].get()))
+                    op.criar_produto(nome_val, codigo_val or None, campos['categoria'].get(), unidade.get(), custo_num, self._para_float(campos['venda'].get()), self._para_float(campos['estoque'].get()), self._para_float(campos['minimo'].get()), custo_conhecido=conhecido)
                 dlg.destroy()
                 self._carrega_produtos()
             except Exception as exc:
@@ -2696,20 +2703,21 @@ class App(GestaoMixin, tk.Tk):
         ttk.Button(botoes_c, text='+  Qtd', width=8, command=lambda: self._alterar_qtd_consumo(1)).pack(side='left', padx=6)
         ttk.Button(botoes_c, text='Remover item (Del)', command=self._remover_consumo_item).pack(side='left')
 
-        tk.Label(esquerda, text='MOTIVO', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).grid(row=3, column=0, sticky='w', padx=16, pady=(4, 2))
-        self.combo_motivo_consumo = ttk.Combobox(esquerda, values=op.MOTIVOS_CONSUMO, font=(FONTE, 9))
-        self.combo_motivo_consumo.set(op.MOTIVOS_CONSUMO[0])
-        self.combo_motivo_consumo.grid(row=4, column=0, sticky='ew', padx=16, pady=(0, 2))
+        # Finalidade é um código ESTÁVEL (classifica o resultado); o motivo é
+        # texto livre (não classifica nada).
+        linha_fin = tk.Frame(esquerda, bg=COR['branco'])
+        linha_fin.grid(row=3, column=0, sticky='ew', padx=16, pady=(4, 2))
+        linha_fin.columnconfigure(0, weight=1); linha_fin.columnconfigure(1, weight=1)
+        tk.Label(linha_fin, text='FINALIDADE', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).grid(row=0, column=0, sticky='w')
+        tk.Label(linha_fin, text='MOTIVO (texto livre, opcional)', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).grid(row=0, column=1, sticky='w')
+        self._finalidade_rotulos = {'Operacional': 'operacional', 'Equipe': 'equipe',
+                                    'Pessoal/família': 'pessoal', 'Outro': 'outro'}
+        self.combo_finalidade_consumo = ttk.Combobox(linha_fin, values=list(self._finalidade_rotulos), state='readonly', font=(FONTE, 9))
+        self.combo_finalidade_consumo.set('Operacional')
+        self.combo_finalidade_consumo.grid(row=1, column=0, sticky='ew', padx=(0, 6))
+        self.combo_motivo_consumo = ttk.Combobox(linha_fin, values=op.MOTIVOS_CONSUMO, font=(FONTE, 9))
+        self.combo_motivo_consumo.grid(row=1, column=1, sticky='ew')
         _uppercase_ao_digitar(self.combo_motivo_consumo)
-        # Mostra a que grupo gerencial o motivo pertence (operacional/equipe/pessoal).
-        self.lbl_grupo_consumo = tk.Label(esquerda, text='', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'italic'))
-        self.lbl_grupo_consumo.grid(row=4, column=0, sticky='e', padx=16, pady=(0, 6))
-
-        def _atualiza_grupo_consumo(_=None):
-            grupo = op.grupo_consumo(self.combo_motivo_consumo.get().strip())
-            self.lbl_grupo_consumo.config(text=f"Classificação: {op.NOMES_GRUPO_CONSUMO.get(grupo, 'Outro')}")
-        self.combo_motivo_consumo.bind('<<ComboboxSelected>>', _atualiza_grupo_consumo)
-        _atualiza_grupo_consumo()
 
         tk.Label(esquerda, text='OBSERVAÇÃO (OPCIONAL)', bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 8, 'bold')).grid(row=5, column=0, sticky='w', padx=16, pady=(4, 2))
         self.entrada_obs_consumo = tk.Entry(esquerda, font=(FONTE, 10), relief='solid', bd=1,
@@ -3081,6 +3089,7 @@ class App(GestaoMixin, tk.Tk):
         if not self.carrinho_consumo:
             messagebox.showinfo('Consumo', 'Adicione ao menos um item na lista usando a busca à direita.')
             return
+        finalidade = self._finalidade_rotulos.get(self.combo_finalidade_consumo.get(), 'outro')
         motivo = self.combo_motivo_consumo.get().strip()
         observacao = self.entrada_obs_consumo.get().strip()
         total = sum(i['quantidade'] * i['preco_custo'] for i in self.carrinho_consumo)
@@ -3093,14 +3102,15 @@ class App(GestaoMixin, tk.Tk):
         if not messagebox.askyesno('Confirmar consumo interno',
                 f"Itens ({len(self.carrinho_consumo)}):\n{itens_txt}\n\n"
                 f"Total (custo): {self._moeda(total)}\n"
-                f"Finalidade: {motivo or 'Não informado'} ({op.NOMES_GRUPO_CONSUMO.get(op.grupo_consumo(motivo), 'Outro')})\n"
+                f"Finalidade: {op.NOMES_GRUPO_CONSUMO.get(finalidade, 'Outro')}"
+                + (f" — {motivo}" if motivo else '') + "\n"
                 f"{aviso_custo}Baixar do estoque?"):
             return
         itens = [{'produto_id': i['produto_id'], 'quantidade': i['quantidade']} for i in self.carrinho_consumo]
         chave = getattr(self, '_chave_consumo', None) or uuid.uuid4().hex
         self._chave_consumo = chave
         try:
-            r = op.registrar_consumo_interno(itens, motivo, observacao, chave=chave)
+            r = op.registrar_consumo_interno(itens, motivo, observacao, chave=chave, finalidade=finalidade)
             self._chave_consumo = None
             self.carrinho_consumo = []
             self._render_carrinho_consumo()
@@ -3665,6 +3675,7 @@ class App(GestaoMixin, tk.Tk):
             self.tv_producoes.column(c, width=w, anchor=('center' if c == 'qtd' else ('e' if c in ('custo_total', 'custo_un') else 'w')))
         self.tv_producoes.tag_configure('par', background=COR['branco'])
         self.tv_producoes.tag_configure('impar', background=COR['zebra'])
+        self.tv_producoes.tag_configure('estornado', foreground=COR['cinza'], font=(FONTE, 9, 'overstrike'))
         self.tv_producoes.bind('<Double-1>', lambda e: self._ver_detalhe_producao())
         self.tv_producoes.grid(row=0, column=0, sticky='nsew')
         sch = ttk.Scrollbar(bloco_hist, orient='vertical', command=self.tv_producoes.yview)
@@ -3697,24 +3708,64 @@ class App(GestaoMixin, tk.Tk):
                 quando = datetime.strptime(pr['data_hora'], '%Y-%m-%d %H:%M:%S').strftime('%d/%m/%Y %H:%M')
             except ValueError:
                 quando = pr['data_hora']
-            tag = 'par' if i % 2 == 0 else 'impar'
+            estornado = bool(pr.get('estornado'))
+            tag = 'estornado' if estornado else ('par' if i % 2 == 0 else 'impar')
+            obs = (pr['observacao'] or '') + ('  ·  ESTORNADA' if estornado else '')
             self.tv_producoes.insert('', 'end', iid=str(pr['id']), tags=(tag,), values=(
                 quando, pr['produto_nome'], self._formatq(pr['quantidade_produzida'], pr['unidade']),
-                self._moeda(pr['custo_total']), self._moeda(pr['custo_unitario']), pr['observacao'] or ''))
+                self._moeda(pr['custo_total']), self._moeda(pr['custo_unitario']), obs))
 
     def _ver_detalhe_producao(self):
         sel = self.tv_producoes.selection()
         if not sel:
             return
-        detalhe = prod.detalhar_producao(int(sel[0]))
+        producao_id = int(sel[0])
+        detalhe = prod.detalhar_producao(producao_id)
         if not detalhe:
             return
-        linhas = '\n'.join(f"  • {self._formatq(i['quantidade'], i['unidade'])} de {i['nome']}" for i in detalhe['insumos'])
-        messagebox.showinfo(
-            f"Produção — {detalhe['produto_nome']}",
-            f"Produziu {self._formatq(detalhe['quantidade_produzida'], detalhe['unidade'])} de {detalhe['produto_nome']}\n"
-            f"Custo total: {self._moeda(detalhe['custo_total'])}  ·  Custo por unidade: {self._moeda(detalhe['custo_unitario'])}\n\n"
-            f"Insumos usados nessa produção ({detalhe['multiplicador']:g}x a receita):\n{linhas}")
+        dlg = tk.Toplevel(self)
+        dlg.title(f"Produção #{producao_id}")
+        dlg.geometry('520x480')
+        dlg.configure(bg=COR['branco'])
+        dlg.transient(self)
+        _grab_set_safe(dlg)
+        dlg.bind('<Escape>', lambda e: dlg.destroy())
+        tk.Frame(dlg, bg=COR['verde2'], height=6).pack(fill='x')
+        tk.Label(dlg, text=f"Produção — {detalhe['produto_nome']}", bg=COR['branco'], fg=COR['verde2'],
+                 font=(FONTE, 14, 'bold')).pack(anchor='w', padx=24, pady=(14, 4))
+        tk.Label(dlg, text=f"Produziu {self._formatq(detalhe['quantidade_produzida'], detalhe['unidade'])} · "
+                           f"custo total {self._moeda(detalhe['custo_total'])} · por unidade {self._moeda(detalhe['custo_unitario'])}",
+                 bg=COR['branco'], fg=COR['cinza'], font=(FONTE, 9), wraplength=460, justify='left').pack(anchor='w', padx=24)
+        tk.Label(dlg, text=f"Insumos usados ({detalhe['multiplicador']:g}x a receita):", bg=COR['branco'], fg=COR['cinza'],
+                 font=(FONTE, 9, 'bold')).pack(anchor='w', padx=24, pady=(10, 2))
+        lista = tk.Listbox(dlg, font=(FONTE, 9), height=8)
+        for i in detalhe['insumos']:
+            lista.insert('end', f"  {self._formatq(i['quantidade'], i['unidade'])} de {i['nome']}")
+        lista.pack(fill='both', expand=True, padx=24)
+        botoes = tk.Frame(dlg, bg=COR['branco'])
+        botoes.pack(fill='x', padx=24, pady=(10, 16), side='bottom')
+        if detalhe.get('estornado'):
+            tk.Label(botoes, text='Produção estornada', bg=COR['branco'], fg=COR['vermelho'],
+                     font=(FONTE, 9, 'bold')).pack(side='left')
+        else:
+            ttk.Button(botoes, text='Estornar produção', style='Secondary.TButton',
+                       command=lambda: self._estornar_producao(producao_id, dlg)).pack(side='left')
+        ttk.Button(botoes, text='Fechar', style='Secondary.TButton', command=dlg.destroy).pack(side='right')
+
+    def _estornar_producao(self, producao_id, dlg):
+        motivo = simpledialog.askstring('Estornar produção',
+                                        'Motivo do estorno (só é permitido se o produto ainda não foi usado):', parent=dlg)
+        if not motivo or not motivo.strip():
+            return
+        try:
+            g.estornar_producao(producao_id, motivo.strip())
+        except Exception as exc:
+            messagebox.showerror('Não foi possível estornar', str(exc), parent=dlg)
+            return
+        dlg.destroy()
+        self._carrega_producao()
+        self._carrega_produtos()
+        self._toast('Produção estornada; insumos devolvidos.')
 
     def _sugestao_produto(self, p):
         """Rótulo de sugestão mostrando nome, unidade e código — para o

@@ -60,9 +60,16 @@ GRUPOS_CONSUMO = {
 }
 NOMES_GRUPO_CONSUMO = {'operacional': 'Operacional', 'equipe': 'Equipe',
                        'pessoal': 'Pessoal/família', 'outro': 'Outro'}
+FINALIDADES_CONSUMO = ['operacional', 'equipe', 'pessoal', 'outro']
 
 
-def grupo_consumo(motivo):
+def grupo_consumo(motivo=None, finalidade=None):
+    """Classificação do consumo. A finalidade é um código estável
+    ('operacional'/'equipe'/'pessoal'/'outro'); o motivo é texto livre. Quando
+    a finalidade não está definida, cai no mapa por motivo (compatibilidade com
+    registros antigos); o que não é reconhecido fica 'outro' (a classificar)."""
+    if finalidade in FINALIDADES_CONSUMO:
+        return finalidade
     return GRUPOS_CONSUMO.get(motivo, 'outro')
 
 
@@ -90,6 +97,17 @@ def centavos_itens(itens):
     for it in itens:
         total += centavos(Decimal(str(it['preco_unitario'])) * Decimal(str(it['quantidade'])))
     return total
+
+
+def custo_historico_item(produto):
+    """Custo a gravar no item histórico: None quando o custo é DESCONHECIDO
+    (nem custo_conhecido nem preço de custo positivo), para não confundir
+    desconhecido com custo econômico zero."""
+    try:
+        conhecido = int(produto['custo_conhecido'] or 0)
+    except (KeyError, IndexError, TypeError):
+        conhecido = 0
+    return produto['preco_custo'] if (conhecido or (produto['preco_custo'] or 0) > 0) else None
 
 
 def custo_medio_entrada(quantidade_antiga, custo_antigo, quantidade_entrada, custo_entrada):
@@ -161,7 +179,7 @@ def auditar(conn, acao, entidade, referencia='', detalhes=None):
 def migrar(conn):
     conn.executescript(Path(__file__).with_name('gestao_schema.sql').read_text(encoding='utf-8'))
     campos = {
-        'produtos': {'sku': 'TEXT', 'perecivel': 'INTEGER NOT NULL DEFAULT 0', 'fornecedor': "TEXT NOT NULL DEFAULT ''"},
+        'produtos': {'sku': 'TEXT', 'perecivel': 'INTEGER NOT NULL DEFAULT 0', 'fornecedor': "TEXT NOT NULL DEFAULT ''", 'custo_conhecido': 'INTEGER NOT NULL DEFAULT 0'},
         'clientes': {'limite_credito': 'REAL', 'prazo_dias': 'INTEGER', 'juros_dia': 'REAL', 'multa_dia': 'REAL'},
         'vendas': {'cancelada': 'INTEGER NOT NULL DEFAULT 0', 'chave_operacao': 'TEXT', 'usuario': "TEXT NOT NULL DEFAULT 'Legado'"},
         'itens_venda': {'custo_unitario': 'REAL', 'nome_original': 'TEXT'},
@@ -169,15 +187,24 @@ def migrar(conn):
                              'chave_operacao': 'TEXT', 'estornado': 'INTEGER NOT NULL DEFAULT 0', 'movimento_id': 'INTEGER',
                              'taxa_centavos': 'INTEGER NOT NULL DEFAULT 0',
                              'usuario': "TEXT NOT NULL DEFAULT 'Legado'"},
-        'consumo_interno': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'centro_custo': "TEXT NOT NULL DEFAULT ''", 'chave': 'TEXT', 'estornado': 'INTEGER NOT NULL DEFAULT 0'},
+        'consumo_interno': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'centro_custo': "TEXT NOT NULL DEFAULT ''", 'chave': 'TEXT', 'estornado': 'INTEGER NOT NULL DEFAULT 0', 'finalidade': "TEXT NOT NULL DEFAULT ''"},
         'perdas': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'chave': 'TEXT', 'estornado': 'INTEGER NOT NULL DEFAULT 0'},
-        'producoes': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'validade': 'TEXT', 'rendimento_real': 'REAL', 'chave': 'TEXT'},
+        'producoes': {'responsavel': "TEXT NOT NULL DEFAULT 'Legado'", 'validade': 'TEXT', 'rendimento_real': 'REAL', 'chave': 'TEXT', 'estornado': 'INTEGER NOT NULL DEFAULT 0'},
     }
     for tabela, colunas in campos.items():
         existentes = {r['name'] for r in conn.execute(f'PRAGMA table_info({tabela})')}
         for nome, definicao in colunas.items():
             if nome not in existentes:
                 conn.execute(f'ALTER TABLE {tabela} ADD COLUMN {nome} {definicao}')
+    # Backfill conservador (v5): só classificações inequívocas. O que não dá
+    # para afirmar com certeza fica 'a classificar' (finalidade vazia).
+    conn.execute("UPDATE produtos SET custo_conhecido=1 WHERE preco_custo>0 AND custo_conhecido=0")
+    for motivo, finalidade in (('Limpeza', 'operacional'),
+                               ('Embalagens e insumos operacionais (sacola, saco, filme)', 'operacional'),
+                               ('Lanches da equipe', 'equipe'),
+                               ('Consumo pessoal/família', 'pessoal')):
+        conn.execute("UPDATE consumo_interno SET finalidade=? WHERE (finalidade IS NULL OR finalidade='') AND motivo=?",
+                     (finalidade, motivo))
     conn.execute("UPDATE produtos SET sku='INT-' || printf('%06d',id) WHERE sku IS NULL OR trim(sku)=''")
     conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_prod_sku ON produtos(sku)')
     conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_venda_chave ON vendas(chave_operacao)')
@@ -365,6 +392,13 @@ def registrar_venda(itens, forma_pagamento='dinheiro', desconto=0, cliente_id=No
     with transacao() as c:
         existente = c.execute('SELECT * FROM vendas WHERE chave_operacao=?',(chave_operacao,)).fetchone()
         if existente:
+            # Mesma chave com itens/desconto/cliente diferentes é conflito.
+            salvos = c.execute('SELECT produto_id,quantidade FROM itens_venda WHERE venda_id=?',(existente['id'],)).fetchall()
+            gravado = sorted((r['produto_id'], round(float(r['quantidade']),3)) for r in salvos)
+            pedido = sorted((it['produto_id'], round(float(quantidade(it['quantidade'])),3)) for it in itens)
+            if (gravado != pedido or existente['cliente_id'] != cliente_id
+                    or centavos(existente['desconto']) != centavos(desconto)):
+                raise ErroGestao('Chave de venda já usada com conteúdo diferente. A venda anterior foi mantida.')
             return dict(existente)
         if config('exigir_caixa_aberto', True, c) and not c.execute('SELECT id FROM sessoes_caixa WHERE fechamento IS NULL').fetchone():
             raise ErroGestao('Abra o caixa antes de iniciar as vendas, em Financeiro → Abrir caixa.')
@@ -404,7 +438,7 @@ def registrar_venda(itens, forma_pagamento='dinheiro', desconto=0, cliente_id=No
         for p,qtd,preco in processados:
             baixar_estoque(c,p['id'],qtd,'Venda',v,permitir_negativo=permitir_negativo)
             c.execute('INSERT INTO itens_venda(venda_id,produto_id,quantidade,preco_unitario,custo_unitario,nome_original) VALUES(?,?,?,?,?,?)',
-                      (v,p['id'],qtd,preco,p['preco_custo'],p['nome']))
+                      (v,p['id'],qtd,preco,custo_historico_item(p),p['nome']))
         if politica:
             prazo=(date.today()+timedelta(days=int(politica['prazo_dias']))).isoformat()
             c.execute('INSERT INTO titulos_receber(venda_id,cliente_id,valor_centavos,vencimento,juros_dia,multa_dia) VALUES(?,?,?,?,?,?)',
@@ -444,8 +478,12 @@ def receber_fiado(cliente_id, valor, observacao='', forma_pagamento='dinheiro', 
     if taxa_centavos<0: raise ErroGestao('Taxa inválida.')
     chave_operacao=chave_operacao or uuid.uuid4().hex
     with transacao() as c:
-        existente=c.execute('SELECT id FROM pagamentos_fiado WHERE chave_operacao=?',(chave_operacao,)).fetchone()
-        if existente: return existente[0]
+        existente=c.execute('SELECT * FROM pagamentos_fiado WHERE chave_operacao=?',(chave_operacao,)).fetchone()
+        if existente:
+            # Mesma chave com cliente/valor diferentes é conflito.
+            if existente['cliente_id']!=cliente_id or centavos(existente['valor'])!=valor:
+                raise ErroGestao('Chave de recebimento já usada com conteúdo diferente. O recebimento anterior foi mantido.')
+            return existente['id']
         saldo=saldo_cliente(c,cliente_id)
         if valor<=0 or valor>saldo: raise ErroGestao('Principal deve ser positivo e não pode exceder o saldo em aberto.')
         if not cobrar_encargos: permitir('credito')
@@ -481,29 +519,42 @@ def recibo_fiado(pid):
     return '\n'.join(linhas)
 
 
-def registrar_baixa(itens,motivo,observacao='',perda=False,responsavel=None,centro_custo='',chave=None):
+def registrar_baixa(itens,motivo,observacao='',perda=False,responsavel=None,centro_custo='',chave=None,finalidade=''):
     permitir('estoque')
     if not itens: raise ErroGestao('Adicione pelo menos um produto.')
+    if finalidade and finalidade not in FINALIDADES_CONSUMO:
+        raise ErroGestao('Finalidade de consumo inválida.')
     tabela='perdas' if perda else 'consumo_interno'
+    item_tab,col=('itens_perda','perda_id') if perda else ('itens_consumo_interno','consumo_id')
     chave=chave or uuid.uuid4().hex
     with transacao() as c:
-        # Idempotência: mesma chave não gera duas baixas (protege de duplo clique
-        # e reenvio). Devolve o lançamento já existente, sem efeito novo.
-        existente=c.execute(f'SELECT id,valor_total FROM {tabela} WHERE chave=?',(chave,)).fetchone()
+        # Idempotência: mesma chave não gera duas baixas. Se a chave já existe,
+        # o conteúdo tem de bater — chave reutilizada com dados diferentes é
+        # conflito (não devolve sucesso de uma operação antiga).
+        existente=c.execute(f'SELECT * FROM {tabela} WHERE chave=?',(chave,)).fetchone()
         if existente:
+            salvos=c.execute(f'SELECT produto_id,quantidade FROM {item_tab} WHERE {col}=?',(existente['id'],)).fetchall()
+            gravado=sorted((r['produto_id'], round(float(r['quantidade']),3)) for r in salvos)
+            pedido=sorted((it['produto_id'], round(float(quantidade(it['quantidade'])),3)) for it in itens)
+            if gravado!=pedido or (existente['motivo'] or '')!=(motivo or ''):
+                raise ErroGestao('Chave de operação já usada com conteúdo diferente. '
+                                 'A operação anterior foi mantida e esta não foi aplicada — confira o lançamento.')
             return {'id':existente['id'],'valor_total':existente['valor_total'],'duplicado':True}
         total=0
-        rid=c.execute(f'INSERT INTO {tabela}(motivo,observacao,responsavel,chave) VALUES(?,?,?,?)',(motivo,observacao,responsavel or USUARIO,chave)).lastrowid
-        if not perda: c.execute('UPDATE consumo_interno SET centro_custo=? WHERE id=?',(centro_custo,rid))
+        if perda:
+            rid=c.execute('INSERT INTO perdas(motivo,observacao,responsavel,chave) VALUES(?,?,?,?)',(motivo,observacao,responsavel or USUARIO,chave)).lastrowid
+        else:
+            rid=c.execute('INSERT INTO consumo_interno(motivo,observacao,responsavel,chave,finalidade) VALUES(?,?,?,?,?)',
+                          (motivo,observacao,responsavel or USUARIO,chave,finalidade or grupo_consumo(motivo))).lastrowid
+            c.execute('UPDATE consumo_interno SET centro_custo=? WHERE id=?',(centro_custo,rid))
         for it in itens:
             qtd=quantidade(it['quantidade'])
             p=baixar_estoque(c,it['produto_id'],qtd,'Perda' if perda else 'Consumo interno',rid,perda,it.get('lote_id'))
             subtotal=centavos(Decimal(str(qtd))*Decimal(str(p['preco_custo'])))
             total+=subtotal
-            tab,col=('itens_perda','perda_id') if perda else ('itens_consumo_interno','consumo_id')
-            c.execute(f'INSERT INTO {tab}({col},produto_id,quantidade,preco_custo_unitario,subtotal) VALUES(?,?,?,?,?)',(rid,p['id'],qtd,p['preco_custo'],subtotal/100))
+            c.execute(f'INSERT INTO {item_tab}({col},produto_id,quantidade,preco_custo_unitario,subtotal) VALUES(?,?,?,?,?)',(rid,p['id'],qtd,p['preco_custo'],subtotal/100))
         c.execute(f'UPDATE {tabela} SET valor_total=? WHERE id=?',(total/100,rid))
-        auditar(c,'baixa',tabela,rid,{'custo_centavos':total,'motivo':motivo})
+        auditar(c,'baixa',tabela,rid,{'custo_centavos':total,'motivo':motivo,'finalidade':finalidade})
         return {'id':rid,'valor_total':total/100}
 
 
@@ -617,7 +668,7 @@ def resumo_financeiro(inicio,fim):
         retiradas=soma("SELECT SUM(valor_centavos) FROM movimentos_financeiros WHERE categoria='Retirada' AND data BETWEEN ? AND ?")
         vendas=soma('SELECT SUM(valor_total) FROM vendas WHERE cancelada=0 AND date(data_hora) BETWEEN ? AND ?')
         cmv=soma('SELECT SUM(i.quantidade*i.custo_unitario) FROM itens_venda i JOIN vendas v ON v.id=i.venda_id WHERE v.cancelada=0 AND date(v.data_hora) BETWEEN ? AND ?')
-        sem_custo=soma('SELECT COUNT(*) FROM itens_venda i JOIN vendas v ON v.id=i.venda_id WHERE v.cancelada=0 AND i.custo_unitario IS NULL AND date(v.data_hora) BETWEEN ? AND ?')
+        sem_custo=soma('SELECT COUNT(*) FROM itens_venda i JOIN vendas v ON v.id=i.venda_id WHERE v.cancelada=0 AND (i.custo_unitario IS NULL OR i.custo_unitario<=0) AND date(v.data_hora) BETWEEN ? AND ?')
         consumo=soma('SELECT SUM(valor_total) FROM consumo_interno WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ?')
         perdas=soma('SELECT SUM(valor_total) FROM perdas WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ?')
         despesas=soma("SELECT SUM(valor_centavos)/100.0 FROM contas_pagar WHERE cancelada=0 AND categoria NOT IN ('Mercadoria para revenda','Investimento') AND competencia BETWEEN ? AND ?")
@@ -631,12 +682,46 @@ def resumo_financeiro(inicio,fim):
         taxas_fiado=soma("SELECT SUM(r.taxa_centavos)/100.0 FROM recebiveis_cartao r JOIN pagamentos_fiado p ON r.origem='fiado' AND r.referencia=CAST(p.id AS TEXT) WHERE p.estornado=0 AND date(p.data_hora) BETWEEN ? AND ?")
         outras_receitas=soma("SELECT SUM(valor_centavos)/100.0 FROM movimentos_financeiros WHERE categoria='Outras receitas' AND data BETWEEN ? AND ?")
         n=soma('SELECT COUNT(*) FROM vendas WHERE cancelada=0 AND date(data_hora) BETWEEN ? AND ?')
+        # Resultado unificado com resultado_gerencial: retirada pessoal/família
+        # NÃO é despesa operacional (fica em 'retiradas_pessoais').
+        rg=resultado_gerencial(inicio,fim)
         return dict(entradas=entradas/100,saidas=saidas/100,fluxo=(entradas-saidas)/100,fluxo_livre=(entradas-saidas-aportes-retiradas)/100,vendas=vendas,cmv=cmv,
                     consumo=consumo,perdas=perdas,despesas=despesas,taxas=taxas+taxas_fiado,encargos_recebidos=encargos_recebidos,
                     encargos_pagos=encargos_pagos,outras_receitas=outras_receitas,
-                    resultado=vendas-cmv-consumo-perdas-despesas-taxas-taxas_fiado+encargos_recebidos-encargos_pagos+outras_receitas,
+                    resultado=rg['resultado_liquido'],retiradas_pessoais=rg['retiradas_pessoais'],
+                    resultado_apos_retiradas=rg['resultado_apos_retiradas'],parcial=rg['parcial'],
                     margem=(vendas-cmv)/vendas*100 if vendas else 0,ticket=vendas/n if n else 0,sem_custo=sem_custo)
     finally: c.close()
+
+
+def componentes_taxas(inicio, fim):
+    """Lista os lançamentos que compõem as taxas de pagamento: a taxa EFETIVA
+    do cartão quando há liquidação; senão a estimada na venda; mais a taxa dos
+    recebimentos de fiado no cartão. É a fonte única usada pelo total e pelo
+    detalhe, para os dois nunca divergirem."""
+    inicio = data_iso(inicio); fim = data_iso(fim)
+    c = db.get_conn()
+    try:
+        itens = []
+        for r in c.execute("""
+            SELECT v.id, v.data_hora,
+                   COALESCE((SELECT rc.taxa_centavos/100.0 FROM recebiveis_cartao rc
+                             WHERE rc.origem='venda' AND rc.referencia=CAST(v.id AS TEXT)), v.taxa_paga) taxa
+            FROM vendas v WHERE v.cancelada=0 AND date(v.data_hora) BETWEEN ? AND ?""", (inicio, fim)).fetchall():
+            if (r['taxa'] or 0) > 0:
+                itens.append({'ref': f"Venda #{r['id']}", 'data': r['data_hora'],
+                              'descricao': 'Taxa de venda / cartão', 'valor': round(r['taxa'], 2)})
+        for r in c.execute("""
+            SELECT p.id, p.data_hora, rc.taxa_centavos/100.0 taxa
+            FROM recebiveis_cartao rc JOIN pagamentos_fiado p
+              ON rc.origem='fiado' AND rc.referencia=CAST(p.id AS TEXT)
+            WHERE p.estornado=0 AND date(p.data_hora) BETWEEN ? AND ?""", (inicio, fim)).fetchall():
+            if (r['taxa'] or 0) > 0:
+                itens.append({'ref': f"Recebimento fiado #{r['id']}", 'data': r['data_hora'],
+                              'descricao': 'Taxa de cartão (recebimento fiado)', 'valor': round(r['taxa'], 2)})
+        return itens
+    finally:
+        c.close()
 
 
 def resultado_gerencial(inicio, fim):
@@ -658,18 +743,13 @@ def resultado_gerencial(inicio, fim):
         vendas = soma("SELECT SUM(valor_total) FROM vendas WHERE cancelada=0 AND date(data_hora) BETWEEN ? AND ?")
         descontos = soma("SELECT SUM(desconto) FROM vendas WHERE cancelada=0 AND date(data_hora) BETWEEN ? AND ?")
         cmv = soma("SELECT SUM(i.quantidade*i.custo_unitario) FROM itens_venda i JOIN vendas v ON v.id=i.venda_id WHERE v.cancelada=0 AND date(v.data_hora) BETWEEN ? AND ?")
-        sem_custo_venda = soma("SELECT COUNT(*) FROM itens_venda i JOIN vendas v ON v.id=i.venda_id WHERE v.cancelada=0 AND i.custo_unitario IS NULL AND date(v.data_hora) BETWEEN ? AND ?")
-        taxas = soma("SELECT SUM(taxa_paga) FROM vendas WHERE cancelada=0 AND date(data_hora) BETWEEN ? AND ?")
-        taxas_cartao = soma("SELECT SUM(r.taxa_centavos)/100.0 FROM recebiveis_cartao r JOIN vendas v ON r.origem='venda' AND r.referencia=CAST(v.id AS TEXT) WHERE v.cancelada=0 AND date(v.data_hora) BETWEEN ? AND ?")
-        taxas_estimadas = soma("SELECT SUM(v.taxa_paga) FROM vendas v WHERE v.cancelada=0 AND EXISTS(SELECT 1 FROM recebiveis_cartao r WHERE r.origem='venda' AND r.referencia=CAST(v.id AS TEXT)) AND date(v.data_hora) BETWEEN ? AND ?")
-        taxas += taxas_cartao - taxas_estimadas
-        taxas_fiado = soma("SELECT SUM(r.taxa_centavos)/100.0 FROM recebiveis_cartao r JOIN pagamentos_fiado p ON r.origem='fiado' AND r.referencia=CAST(p.id AS TEXT) WHERE p.estornado=0 AND date(p.data_hora) BETWEEN ? AND ?")
-        taxas += taxas_fiado
+        sem_custo_venda = soma("SELECT COUNT(*) FROM itens_venda i JOIN vendas v ON v.id=i.venda_id WHERE v.cancelada=0 AND (i.custo_unitario IS NULL OR i.custo_unitario<=0) AND date(v.data_hora) BETWEEN ? AND ?")
+        taxas = round(sum(i['valor'] for i in componentes_taxas(inicio, fim)), 2)
         perdas = soma("SELECT SUM(valor_total) FROM perdas WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ?")
         sem_custo_perda = soma("SELECT COUNT(*) FROM itens_perda ip JOIN perdas p ON p.id=ip.perda_id WHERE p.estornado=0 AND ip.preco_custo_unitario<=0 AND date(p.data_hora) BETWEEN ? AND ?")
         grupos = {k: 0.0 for k in ('operacional', 'equipe', 'pessoal', 'outro')}
-        for r in c.execute("SELECT motivo, COALESCE(SUM(valor_total),0) total FROM consumo_interno WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ? GROUP BY motivo", (inicio, fim)).fetchall():
-            grupos[grupo_consumo(r['motivo'])] += r['total'] or 0
+        for r in c.execute("SELECT COALESCE(finalidade,'') finalidade, motivo, COALESCE(SUM(valor_total),0) total FROM consumo_interno WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ? GROUP BY finalidade, motivo", (inicio, fim)).fetchall():
+            grupos[grupo_consumo(r['motivo'], r['finalidade'])] += r['total'] or 0
         sem_custo_consumo = soma("SELECT COUNT(*) FROM itens_consumo_interno ici JOIN consumo_interno ci ON ci.id=ici.consumo_id WHERE ci.estornado=0 AND ici.preco_custo_unitario<=0 AND date(ci.data_hora) BETWEEN ? AND ?")
         despesas = soma("SELECT SUM(valor_centavos)/100.0 FROM contas_pagar WHERE cancelada=0 AND categoria NOT IN ('Mercadoria para revenda','Investimento') AND competencia BETWEEN ? AND ?")
         outras_receitas = soma("SELECT SUM(valor_centavos)/100.0 FROM movimentos_financeiros WHERE categoria='Outras receitas' AND data BETWEEN ? AND ?")
@@ -754,8 +834,8 @@ def lancamentos_componente(componente, inicio, fim):
         if componente in ('consumo_operacional', 'consumo_equipe', 'consumo_outro', 'retiradas_pessoais'):
             alvo = {'consumo_operacional': 'operacional', 'consumo_equipe': 'equipe',
                     'consumo_outro': 'outro', 'retiradas_pessoais': 'pessoal'}[componente]
-            rows = c.execute("SELECT id,data_hora,motivo,valor_total FROM consumo_interno WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ? ORDER BY data_hora", (inicio, fim)).fetchall()
-            return [{'ref': f"Consumo #{r['id']}", 'data': r['data_hora'], 'descricao': r['motivo'] or '—', 'valor': round(r['valor_total'], 2)} for r in rows if grupo_consumo(r['motivo']) == alvo]
+            rows = c.execute("SELECT id,data_hora,motivo,COALESCE(finalidade,'') finalidade,valor_total FROM consumo_interno WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ? ORDER BY data_hora", (inicio, fim)).fetchall()
+            return [{'ref': f"Consumo #{r['id']}", 'data': r['data_hora'], 'descricao': r['motivo'] or '—', 'valor': round(r['valor_total'], 2)} for r in rows if grupo_consumo(r['motivo'], r['finalidade']) == alvo]
         if componente == 'perdas':
             rows = c.execute("SELECT id,data_hora,motivo,valor_total FROM perdas WHERE estornado=0 AND date(data_hora) BETWEEN ? AND ? ORDER BY data_hora", (inicio, fim)).fetchall()
             return [{'ref': f"Perda #{r['id']}", 'data': r['data_hora'], 'descricao': r['motivo'] or '—', 'valor': round(r['valor_total'], 2)} for r in rows]
@@ -763,8 +843,7 @@ def lancamentos_componente(componente, inicio, fim):
             rows = c.execute("SELECT t.id,t.descricao,t.competencia,cc.nome credor,t.valor_centavos/100.0 valor FROM contas_pagar t JOIN credores cc ON cc.id=t.credor_id WHERE t.cancelada=0 AND t.categoria NOT IN ('Mercadoria para revenda','Investimento') AND t.competencia BETWEEN ? AND ? ORDER BY t.competencia", (inicio, fim)).fetchall()
             return [{'ref': f"Conta #{r['id']}", 'data': r['competencia'], 'descricao': f"{r['credor']} — {r['descricao']}", 'valor': round(r['valor'], 2)} for r in rows]
         if componente == 'taxas':
-            rows = c.execute("SELECT v.id,v.data_hora,v.taxa_paga FROM vendas v WHERE v.cancelada=0 AND v.taxa_paga>0 AND date(v.data_hora) BETWEEN ? AND ? ORDER BY v.data_hora", (inicio, fim)).fetchall()
-            return [{'ref': f"Venda #{r['id']}", 'data': r['data_hora'], 'descricao': 'Taxa de venda', 'valor': round(r['taxa_paga'], 2)} for r in rows]
+            return componentes_taxas(inicio, fim)
         return []
     finally:
         c.close()
@@ -897,8 +976,13 @@ def registrar_producao(receita_id,multiplicador,observacao='',validade=None,rend
     if validade<date.today().isoformat(): raise ErroGestao('Produção não pode entrar com validade vencida.')
     chave=chave or uuid.uuid4().hex
     with transacao() as c:
-        existente=c.execute('SELECT id,quantidade_produzida,custo_total,custo_unitario FROM producoes WHERE chave=?',(chave,)).fetchone()
+        existente=c.execute('SELECT * FROM producoes WHERE chave=?',(chave,)).fetchone()
         if existente:
+            # Mesma chave com conteúdo diferente é conflito, não sucesso antigo.
+            if (existente['receita_id']!=receita_id or round(float(existente['multiplicador']),3)!=round(float(mult),3)
+                    or (existente['validade'] or '')!=validade):
+                raise ErroGestao('Chave de operação já usada com conteúdo diferente. '
+                                 'A produção anterior foi mantida e esta não foi aplicada.')
             return {'id':existente['id'],'quantidade_produzida':existente['quantidade_produzida'],
                     'custo_total':existente['custo_total'],'custo_unitario':existente['custo_unitario'],
                     'insumos_usados':[],'duplicado':True}
@@ -986,6 +1070,50 @@ def estornar_baixa(baixa_id,motivo,perda=False):
         c.execute(f'UPDATE {tabela} SET estornado=1 WHERE id=?',(baixa_id,))
         auditar(c,'estornar',tabela,baixa_id,{'motivo':motivo})
         return baixa_id
+
+
+def estornar_producao(producao_id,motivo):
+    """Corrige uma produção lançada por engano: devolve os insumos (estoque e
+    lotes), remove o produto acabado e seu lote, e marca a produção como
+    estornada. NÃO devolve insumos se o produto acabado já foi vendido,
+    consumido ou perdido depois — detecta dependências e bloqueia."""
+    permitir('estornar')
+    if not motivo.strip(): raise ErroGestao('Justifique o estorno.')
+    with transacao() as c:
+        pr=c.execute('SELECT * FROM producoes WHERE id=?',(producao_id,)).fetchone()
+        if not pr: raise ErroGestao('Produção não encontrada.')
+        if pr['estornado']: raise ErroGestao('Produção já estornada.')
+        r=c.execute('SELECT * FROM receitas WHERE id=?',(pr['receita_id'],)).fetchone()
+        if not r: raise ErroGestao('Receita da produção não encontrada.')
+        pf=r['produto_id']
+        uso=c.execute("""SELECT
+            (SELECT COUNT(*) FROM itens_venda i JOIN vendas v ON v.id=i.venda_id
+               WHERE i.produto_id=? AND v.cancelada=0 AND datetime(v.data_hora)>=datetime(?))
+          + (SELECT COUNT(*) FROM itens_consumo_interno ic JOIN consumo_interno ci ON ci.id=ic.consumo_id
+               WHERE ic.produto_id=? AND ci.estornado=0 AND datetime(ci.data_hora)>=datetime(?))
+          + (SELECT COUNT(*) FROM itens_perda ip JOIN perdas p ON p.id=ip.perda_id
+               WHERE ip.produto_id=? AND p.estornado=0 AND datetime(p.data_hora)>=datetime(?))""",
+          (pf,pr['data_hora'],pf,pr['data_hora'],pf,pr['data_hora'])).fetchone()[0]
+        if uso:
+            raise ErroGestao('O produto desta produção já foi vendido/consumido/perdido depois. '
+                             'Estorne esses lançamentos antes de reverter a produção.')
+        c.execute('UPDATE produtos SET quantidade_estoque=round(quantidade_estoque-?,3) WHERE id=?',(pr['quantidade_produzida'],pf))
+        c.execute("INSERT INTO movimentacoes_estoque(produto_id,tipo,quantidade,observacao) VALUES(?,'saida',?,?)",
+                  (pf,pr['quantidade_produzida'],f'Estorno produção #{producao_id}: {motivo}'))
+        lote=c.execute("SELECT id,quantidade FROM lotes_validade WHERE produto_id=? AND observacao=? AND quantidade>0",
+                       (pf,f'Produção #{producao_id}')).fetchone()
+        if lote:
+            c.execute('UPDATE lotes_validade SET quantidade=round(quantidade-?,3) WHERE id=?',
+                      (min(lote['quantidade'],pr['quantidade_produzida']),lote['id']))
+        for it in c.execute('SELECT produto_id,quantidade FROM insumos_producao WHERE producao_id=?',(producao_id,)).fetchall():
+            c.execute('UPDATE produtos SET quantidade_estoque=round(quantidade_estoque+?,3) WHERE id=?',(it['quantidade'],it['produto_id']))
+            c.execute("INSERT INTO movimentacoes_estoque(produto_id,tipo,quantidade,observacao) VALUES(?,'entrada',?,?)",
+                      (it['produto_id'],it['quantidade'],f'Estorno produção #{producao_id}: {motivo}'))
+        for l in c.execute("SELECT lote_id,quantidade FROM baixas_lotes WHERE origem='Produção' AND referencia=?",(str(producao_id),)).fetchall():
+            c.execute('UPDATE lotes_validade SET quantidade=round(quantidade+?,3) WHERE id=?',(l['quantidade'],l['lote_id']))
+        c.execute('UPDATE producoes SET estornado=1 WHERE id=?',(producao_id,))
+        auditar(c,'estornar','producoes',producao_id,{'motivo':motivo})
+        return producao_id
 
 
 def cancelar_venda(vid,motivo):

@@ -51,7 +51,7 @@ The application initializes its SQLite database on first run. On the first launc
 
 **2. Consumo interno** (uso operacional/equipe — sai pelo preço de custo, não é venda):
 1. Aba **Consumo interno** → busque o produto por nome/código e informe a quantidade (aceita vírgula).
-2. Confira a lista e escolha o **motivo** (limpeza/embalagens = operacional, "Lanches da equipe" = equipe, "Consumo pessoal/família" = retirada).
+2. Escolha a **Finalidade** (código estável: Operacional / Equipe / Pessoal‑família / Outro) e, se quiser, escreva um **Motivo** livre (não classifica nada).
 3. **Registrar consumo**. A tela mostra a **prévia do custo**; se o custo for desconhecido, avisa e marca o total como parcial. Falta de estoque mostra a causa (registre entrada/inventário primeiro).
 
 **3. Retirada familiar** — mesma tela do consumo, motivo **"Consumo pessoal/família"**. Entra como **retirada** (não é despesa operacional) e aparece separada no resultado.
@@ -64,6 +64,7 @@ The application initializes its SQLite database on first run. On the first launc
 1. Cadastre a **receita** (produto final, rendimento e insumos) — selecione cada insumo e produto final na lista de sugestões (nome + unidade + código).
 2. **Registrar produção** → a tela mostra a **prévia** (insumos necessários × disponíveis, custo, rendimento previsto/real, validade). Informe quantas vezes fez a receita, o rendimento real e a validade.
 3. Tudo é gravado numa **única transação**: se faltar um insumo, nada é alterado. O custo dos insumos vira o custo do produto final **uma única vez** (não é lançado também como consumo). Duplo clique não gera duas produções.
+4. **Correção:** no detalhe da produção, **Estornar produção** devolve os insumos e remove o produto acabado — mas **só** se o produto ainda não foi vendido/consumido/perdido depois (o sistema detecta e bloqueia).
 
 **6. Conta da loja e pagamento**
 - **Financeiro → Contas a pagar → Nova conta**: credor, descrição, categoria (aluguel, energia, água, internet, salários, manutenção, serviços...), valor, **competência** (mês em que conta no resultado), vencimento e documento.

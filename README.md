@@ -2,6 +2,13 @@
 
 A desktop retail-management application built with **Python, Tkinter and SQLite**. It combines checkout and inventory operations with customer credit, purchasing and financial management. The user interface is primarily in Brazilian Portuguese.
 
+| | |
+|:--|:--|
+| **Live demo** | Desktop app — no hosted demo |
+| **Screenshots** | Pending — see [docs/CAPTURE_GUIDE.md](docs/CAPTURE_GUIDE.md) |
+| **Stack** | Python · Tkinter · SQLite |
+| **License** | MIT — [LICENSE](LICENSE) |
+
 ## Features
 
 - Product catalog, checkout, stock movements and customer accounts.
@@ -160,6 +167,12 @@ The regression suite redirects database operations to temporary files. The inter
 This portfolio snapshot is intended for local demonstrations. Physical peripherals were not validated during publication. It does not provide fiscal certification or direct payment processing. The [Java/React version](https://github.com/FelipeFeerreira/retail-pos-java) explores a separate web-based implementation.
 
 ---
+
+## What I would do next
+
+- Capture the operator screens and build a Windows .exe so the app can be tried without Python.
+- Validate the Toledo 8217 scale integration on real hardware and record the result in Verification.
+- Add automated tests around stock movements and cash closing.
 
 ## License
 
